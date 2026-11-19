@@ -118,7 +118,7 @@ async def test_live_ws_execute_dual_completion_both_orders(reply_before_idle: bo
             blocks = await client.execute("print('Step 1'); plot(); print('Step 2')")
             assert len(blocks) == 3
             assert isinstance(blocks[0], TextContent) and "Step 1" in blocks[0].text
-            assert isinstance(blocks[1], ImageContent) and blocks[1].mimeType == "image/png"
+            assert isinstance(blocks[1], ImageContent) and blocks[1].mime_type == "image/png"
             assert isinstance(blocks[2], TextContent) and "Step 2" in blocks[2].text
         finally:
             await client.disconnect()

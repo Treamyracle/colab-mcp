@@ -54,7 +54,7 @@ Authenticate with your Google account, provision CPU/GPU/TPU runtimes, execute P
 |                                          |                                              |
 |                                          v                                              |
 |  +-----------------------------------------------------------------------------------+  |
-|  |                             FastMCP Tool Dispatcher                               |  |
+|  |                            MCPServer Tool Dispatcher                              |  |
 |  |   - Pydantic v2 schema validation & Global Egress Credential Redaction            |  |
 |  +-----------------------------------------------------------------------------------+  |
 |       |                        |                        |                        |      |

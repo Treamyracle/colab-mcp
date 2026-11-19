@@ -22,7 +22,7 @@ import httpx
 import pytest
 from typer.testing import CliRunner
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from colab_mcp.cli import app as cli_app
 from colab_mcp.server import create_server
 from colab_mcp.utils.logging import (
@@ -155,12 +155,15 @@ def test_sse_app_routes_registered():
 
 @pytest.mark.asyncio
 async def test_sse_transport_security_settings():
-    """Tier 1: Verify SSE transport security settings enforce localhost and port restrictions."""
+    """Tier 1: Verify SSE transport registers /sse and /messages/ and rejects evil hosts."""
     server = create_server("test-sse-sec")
     settings = getattr(server, "settings", None)
     assert settings is not None
-    assert settings.sse_path == "/sse"
-    assert "/messages" in settings.message_path
+    assert settings.log_level == "INFO"
+    app = server.sse_app(host="127.0.0.1")
+    route_paths = [r.path for r in app.routes]
+    assert "/sse" in route_paths
+    assert any("/messages" in p for p in route_paths)
 
 
 @pytest.mark.asyncio

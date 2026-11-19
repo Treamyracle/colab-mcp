@@ -14,7 +14,7 @@ import time
 from typing import Any, Dict, Optional
 
 import httpx
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from colab_mcp.auth.models import AuthenticationRequiredError
 from colab_mcp.runtime.client import ColabTFEClient
@@ -585,8 +585,8 @@ async def colab_disconnect_runtime(
     )
 
 
-def register_runtime_tools(mcp: FastMCP) -> None:
-    """Register all runtime lifecycle MCP tools on the FastMCP server."""
+def register_runtime_tools(mcp: MCPServer) -> None:
+    """Register all runtime lifecycle MCP tools on the MCPServer."""
 
     @mcp.tool(
         name="colab_list_runtime_types",

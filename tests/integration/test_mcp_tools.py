@@ -20,9 +20,9 @@ from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
-from mcp.types import ImageContent, TextContent
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import CallToolResult, ImageContent, TextContent
 
 from colab_mcp.server import create_server
 
@@ -73,13 +73,13 @@ async def test_server(mock_keystore_dir, mock_keyring, mock_machine_id):
         reset_session_manager()
 
 
-async def get_registered_tool_names(server: FastMCP) -> set[str]:
+async def get_registered_tool_names(server: MCPServer) -> set[str]:
     """Retrieve set of tool names registered on the server."""
     tools = await server.list_tools()
     return {t.name for t in tools}
 
 
-async def get_tool_definition(server: FastMCP, tool_name: str):
+async def get_tool_definition(server: MCPServer, tool_name: str):
     """Retrieve MCP Tool object by name."""
     tools = await server.list_tools()
     for t in tools:
@@ -88,15 +88,22 @@ async def get_tool_definition(server: FastMCP, tool_name: str):
     return None
 
 
-async def require_tool(server: FastMCP, tool_name: str):
-    """Progressive testability: skip test if the tool is not yet registered on FastMCP server."""
+async def require_tool(server: MCPServer, tool_name: str):
+    """Progressive testability: skip test if the tool is not yet registered on MCPServer."""
     registered = await get_registered_tool_names(server)
     if tool_name not in registered:
-        pytest.skip(f"Tool '{tool_name}' is not yet registered on FastMCP server (in-progress milestone)")
+        pytest.skip(f"Tool '{tool_name}' is not yet registered on MCPServer (in-progress milestone)")
 
 
 def extract_content_text(tool_result: Any) -> str:
-    """Extract string content from FastMCP call_tool return value."""
+    """Extract string content from MCPServer call_tool return value."""
+    if isinstance(tool_result, CallToolResult):
+        if tool_result.content:
+            first = tool_result.content[0]
+            if hasattr(first, "text"):
+                return first.text
+            if isinstance(first, dict) and "text" in first:
+                return first["text"]
     if isinstance(tool_result, tuple):
         content_blocks = tool_result[0]
         if isinstance(content_blocks, list) and len(content_blocks) > 0:
@@ -115,7 +122,10 @@ def extract_content_text(tool_result: Any) -> str:
 
 
 def extract_result_dict(tool_result: Any) -> Dict[str, Any]:
-    """Extract structured dict from FastMCP call_tool result."""
+    """Extract structured dict from MCPServer call_tool result."""
+    if isinstance(tool_result, CallToolResult):
+        if tool_result.structured_content is not None:
+            return dict(tool_result.structured_content)
     if isinstance(tool_result, tuple) and len(tool_result) > 1 and isinstance(tool_result[1], dict):
         return tool_result[1]
     raw_text = extract_content_text(tool_result)
@@ -130,7 +140,7 @@ def extract_result_dict(tool_result: Any) -> Dict[str, Any]:
 # ============================================================================
 
 @pytest.mark.asyncio
-async def test_tool_inventory_registered(test_server: FastMCP):
+async def test_tool_inventory_registered(test_server: MCPServer):
     """Verify currently registered tools have descriptions and input schemas."""
     tools = await test_server.list_tools()
     assert len(tools) >= 3  # At least auth tools registered in baseline
@@ -138,12 +148,12 @@ async def test_tool_inventory_registered(test_server: FastMCP):
         assert tool.name in ALL_EXPECTED_MCP_TOOLS
         assert tool.description is not None
         assert len(tool.description) > 10
-        assert isinstance(tool.inputSchema, dict)
-        assert tool.inputSchema.get("type") == "object"
+        assert isinstance(tool.input_schema, dict)
+        assert tool.input_schema.get("type") == "object"
 
 
 @pytest.mark.asyncio
-async def test_all_12_tools_registered_when_m4_complete(test_server: FastMCP):
+async def test_all_12_tools_registered_when_m4_complete(test_server: MCPServer):
     """Verify all 12 MCP tools are registered once Milestone 4 is fully completed."""
     registered = await get_registered_tool_names(test_server)
     missing = [t for t in ALL_12_MCP_TOOLS if t not in registered]
@@ -159,7 +169,7 @@ async def test_all_12_tools_registered_when_m4_complete(test_server: FastMCP):
 # --- Tool 1: colab_login ---
 
 @pytest.mark.asyncio
-async def test_tool_1_colab_login_valid_remote_step1(test_server: FastMCP):
+async def test_tool_1_colab_login_valid_remote_step1(test_server: MCPServer):
     """Tier 1: Valid colab_login step 1 with oauth_remote generates auth_url."""
     await require_tool(test_server, "colab_login")
     result = await test_server.call_tool("colab_login", {"method": "oauth_remote", "auth_user_index": 0})
@@ -171,7 +181,7 @@ async def test_tool_1_colab_login_valid_remote_step1(test_server: FastMCP):
 
 
 @pytest.mark.asyncio
-async def test_tool_1_colab_login_defaults(test_server: FastMCP):
+async def test_tool_1_colab_login_defaults(test_server: MCPServer):
     """Tier 1: Calling colab_login with empty arguments applies default parameters."""
     await require_tool(test_server, "colab_login")
     result = await test_server.call_tool("colab_login", {})
@@ -182,7 +192,7 @@ async def test_tool_1_colab_login_defaults(test_server: FastMCP):
 
 
 @pytest.mark.asyncio
-async def test_tool_1_colab_login_invalid_method(test_server: FastMCP):
+async def test_tool_1_colab_login_invalid_method(test_server: MCPServer):
     """Tier 2: Calling colab_login with an invalid auth method raises ToolError."""
     await require_tool(test_server, "colab_login")
     with pytest.raises((ToolError, ValueError)):
@@ -190,7 +200,7 @@ async def test_tool_1_colab_login_invalid_method(test_server: FastMCP):
 
 
 @pytest.mark.asyncio
-async def test_tool_1_colab_login_invalid_negative_user_index(test_server: FastMCP):
+async def test_tool_1_colab_login_invalid_negative_user_index(test_server: MCPServer):
     """Tier 2: Negative auth_user_index raises ToolError / validation error."""
     await require_tool(test_server, "colab_login")
     with pytest.raises((ToolError, ValueError)):
@@ -198,7 +208,7 @@ async def test_tool_1_colab_login_invalid_negative_user_index(test_server: FastM
 
 
 @pytest.mark.asyncio
-async def test_tool_1_colab_login_timeout_out_of_bounds(test_server: FastMCP):
+async def test_tool_1_colab_login_timeout_out_of_bounds(test_server: MCPServer):
     """Tier 2: timeout_seconds < 30 or > 600 raises ToolError / validation error."""
     await require_tool(test_server, "colab_login")
     with pytest.raises((ToolError, ValueError)):
@@ -208,7 +218,7 @@ async def test_tool_1_colab_login_timeout_out_of_bounds(test_server: FastMCP):
 # --- Tool 2: colab_get_auth_status ---
 
 @pytest.mark.asyncio
-async def test_tool_2_colab_get_auth_status_valid_unauthenticated(test_server: FastMCP):
+async def test_tool_2_colab_get_auth_status_valid_unauthenticated(test_server: MCPServer):
     """Tier 1: colab_get_auth_status returns clean unauthenticated status."""
     await require_tool(test_server, "colab_get_auth_status")
     result = await test_server.call_tool("colab_get_auth_status", {"auth_user_index": 0})
@@ -219,7 +229,7 @@ async def test_tool_2_colab_get_auth_status_valid_unauthenticated(test_server: F
 
 
 @pytest.mark.asyncio
-async def test_tool_2_colab_get_auth_status_valid_authenticated(test_server: FastMCP, sample_credentials):
+async def test_tool_2_colab_get_auth_status_valid_authenticated(test_server: MCPServer, sample_credentials):
     """Tier 1: colab_get_auth_status returns authenticated status when creds stored."""
     await require_tool(test_server, "colab_get_auth_status")
     from colab_mcp.auth.keystore import store_credentials
@@ -233,7 +243,7 @@ async def test_tool_2_colab_get_auth_status_valid_authenticated(test_server: Fas
 
 
 @pytest.mark.asyncio
-async def test_tool_2_colab_get_auth_status_invalid_type(test_server: FastMCP):
+async def test_tool_2_colab_get_auth_status_invalid_type(test_server: MCPServer):
     """Tier 2: Non-integer auth_user_index raises ToolError."""
     await require_tool(test_server, "colab_get_auth_status")
     with pytest.raises((ToolError, ValueError, TypeError)):
@@ -241,7 +251,7 @@ async def test_tool_2_colab_get_auth_status_invalid_type(test_server: FastMCP):
 
 
 @pytest.mark.asyncio
-async def test_tool_2_colab_get_auth_status_negative_index(test_server: FastMCP):
+async def test_tool_2_colab_get_auth_status_negative_index(test_server: MCPServer):
     """Tier 2: Negative auth_user_index raises ToolError / validation error."""
     await require_tool(test_server, "colab_get_auth_status")
     with pytest.raises((ToolError, ValueError)):
@@ -251,7 +261,7 @@ async def test_tool_2_colab_get_auth_status_negative_index(test_server: FastMCP)
 # --- Tool 3: colab_logout ---
 
 @pytest.mark.asyncio
-async def test_tool_3_colab_logout_valid(test_server: FastMCP, sample_credentials):
+async def test_tool_3_colab_logout_valid(test_server: MCPServer, sample_credentials):
     """Tier 1: colab_logout purges keystore and returns logged_out status."""
     await require_tool(test_server, "colab_logout")
     from colab_mcp.auth.keystore import store_credentials
@@ -265,7 +275,7 @@ async def test_tool_3_colab_logout_valid(test_server: FastMCP, sample_credential
 
 
 @pytest.mark.asyncio
-async def test_tool_3_colab_logout_defaults(test_server: FastMCP):
+async def test_tool_3_colab_logout_defaults(test_server: MCPServer):
     """Tier 1: colab_logout with default arguments."""
     await require_tool(test_server, "colab_logout")
     result = await test_server.call_tool("colab_logout", {})
@@ -275,7 +285,7 @@ async def test_tool_3_colab_logout_defaults(test_server: FastMCP):
 
 
 @pytest.mark.asyncio
-async def test_tool_3_colab_logout_invalid_boolean_type(test_server: FastMCP):
+async def test_tool_3_colab_logout_invalid_boolean_type(test_server: MCPServer):
     """Tier 2: Invalid type for terminate_active_runtimes raises ToolError."""
     await require_tool(test_server, "colab_logout")
     with pytest.raises((ToolError, ValueError, TypeError)):
@@ -289,7 +299,7 @@ async def test_tool_3_colab_logout_invalid_boolean_type(test_server: FastMCP):
 # --- Tool 4: colab_list_runtime_types ---
 
 @pytest.mark.asyncio
-async def test_tool_4_colab_list_runtime_types_valid(test_server: FastMCP):
+async def test_tool_4_colab_list_runtime_types_valid(test_server: MCPServer):
     """Tier 1: colab_list_runtime_types returns list of accelerators and tier."""
     await require_tool(test_server, "colab_list_runtime_types")
     result = await test_server.call_tool("colab_list_runtime_types", {"auth_user_index": 0})
@@ -303,7 +313,7 @@ async def test_tool_4_colab_list_runtime_types_valid(test_server: FastMCP):
 
 
 @pytest.mark.asyncio
-async def test_tool_4_colab_list_runtime_types_defaults(test_server: FastMCP):
+async def test_tool_4_colab_list_runtime_types_defaults(test_server: MCPServer):
     """Tier 1: colab_list_runtime_types defaults."""
     await require_tool(test_server, "colab_list_runtime_types")
     result = await test_server.call_tool("colab_list_runtime_types", {})
@@ -312,7 +322,7 @@ async def test_tool_4_colab_list_runtime_types_defaults(test_server: FastMCP):
 
 
 @pytest.mark.asyncio
-async def test_tool_4_colab_list_runtime_types_invalid_type(test_server: FastMCP):
+async def test_tool_4_colab_list_runtime_types_invalid_type(test_server: MCPServer):
     """Tier 2: Non-integer auth_user_index raises ToolError."""
     await require_tool(test_server, "colab_list_runtime_types")
     with pytest.raises((ToolError, ValueError, TypeError)):
@@ -346,7 +356,7 @@ def _mock_tfe_connect_patches():
 
 
 @pytest.mark.asyncio
-async def test_tool_5_colab_connect_runtime_valid(test_server: FastMCP):
+async def test_tool_5_colab_connect_runtime_valid(test_server: MCPServer):
     """Tier 1: colab_connect_runtime provisions or connects to runtime."""
     await require_tool(test_server, "colab_connect_runtime")
     p_tfe, p_probe, p_keepalive = _mock_tfe_connect_patches()
@@ -361,7 +371,7 @@ async def test_tool_5_colab_connect_runtime_valid(test_server: FastMCP):
 
 
 @pytest.mark.asyncio
-async def test_tool_5_colab_connect_runtime_defaults(test_server: FastMCP):
+async def test_tool_5_colab_connect_runtime_defaults(test_server: MCPServer):
     """Tier 1: colab_connect_runtime defaults."""
     await require_tool(test_server, "colab_connect_runtime")
     p_tfe, p_probe, p_keepalive = _mock_tfe_connect_patches()
@@ -372,7 +382,7 @@ async def test_tool_5_colab_connect_runtime_defaults(test_server: FastMCP):
 
 
 @pytest.mark.asyncio
-async def test_tool_5_colab_connect_runtime_invalid_accelerator(test_server: FastMCP):
+async def test_tool_5_colab_connect_runtime_invalid_accelerator(test_server: MCPServer):
     """Tier 2: Invalid accelerator raises ToolError / validation error."""
     await require_tool(test_server, "colab_connect_runtime")
     with pytest.raises((ToolError, ValueError)):
@@ -380,7 +390,7 @@ async def test_tool_5_colab_connect_runtime_invalid_accelerator(test_server: Fas
 
 
 @pytest.mark.asyncio
-async def test_tool_5_colab_connect_runtime_timeout_out_of_bounds(test_server: FastMCP):
+async def test_tool_5_colab_connect_runtime_timeout_out_of_bounds(test_server: MCPServer):
     """Tier 2: Timeout < 30 seconds raises ToolError / validation error."""
     await require_tool(test_server, "colab_connect_runtime")
     with pytest.raises((ToolError, ValueError)):
@@ -390,7 +400,7 @@ async def test_tool_5_colab_connect_runtime_timeout_out_of_bounds(test_server: F
 # --- Tool 6: colab_get_runtime_status ---
 
 @pytest.mark.asyncio
-async def test_tool_6_colab_get_runtime_status_valid(test_server: FastMCP):
+async def test_tool_6_colab_get_runtime_status_valid(test_server: MCPServer):
     """Tier 1: colab_get_runtime_status returns runtime metrics and state."""
     await require_tool(test_server, "colab_get_runtime_status")
     result = await test_server.call_tool("colab_get_runtime_status", {"runtime_id": "colab-test-123"})
@@ -400,7 +410,7 @@ async def test_tool_6_colab_get_runtime_status_valid(test_server: FastMCP):
 
 
 @pytest.mark.asyncio
-async def test_tool_6_colab_get_runtime_status_defaults(test_server: FastMCP):
+async def test_tool_6_colab_get_runtime_status_defaults(test_server: MCPServer):
     """Tier 1: colab_get_runtime_status with default arguments."""
     await require_tool(test_server, "colab_get_runtime_status")
     result = await test_server.call_tool("colab_get_runtime_status", {})
@@ -409,7 +419,7 @@ async def test_tool_6_colab_get_runtime_status_defaults(test_server: FastMCP):
 
 
 @pytest.mark.asyncio
-async def test_tool_6_colab_get_runtime_status_invalid_type(test_server: FastMCP):
+async def test_tool_6_colab_get_runtime_status_invalid_type(test_server: MCPServer):
     """Tier 2: Non-string runtime_id raises ToolError."""
     await require_tool(test_server, "colab_get_runtime_status")
     with pytest.raises((ToolError, ValueError, TypeError)):
@@ -419,7 +429,7 @@ async def test_tool_6_colab_get_runtime_status_invalid_type(test_server: FastMCP
 # --- Tool 7: colab_disconnect_runtime ---
 
 @pytest.mark.asyncio
-async def test_tool_7_colab_disconnect_runtime_valid(test_server: FastMCP):
+async def test_tool_7_colab_disconnect_runtime_valid(test_server: MCPServer):
     """Tier 1: colab_disconnect_runtime releases VM resources."""
     await require_tool(test_server, "colab_disconnect_runtime")
     result = await test_server.call_tool("colab_disconnect_runtime", {"runtime_id": "colab-test-123"})
@@ -428,7 +438,7 @@ async def test_tool_7_colab_disconnect_runtime_valid(test_server: FastMCP):
 
 
 @pytest.mark.asyncio
-async def test_tool_7_colab_disconnect_runtime_defaults(test_server: FastMCP):
+async def test_tool_7_colab_disconnect_runtime_defaults(test_server: MCPServer):
     """Tier 1: colab_disconnect_runtime defaults."""
     await require_tool(test_server, "colab_disconnect_runtime")
     result = await test_server.call_tool("colab_disconnect_runtime", {})
@@ -437,7 +447,7 @@ async def test_tool_7_colab_disconnect_runtime_defaults(test_server: FastMCP):
 
 
 @pytest.mark.asyncio
-async def test_tool_7_colab_disconnect_runtime_invalid_type(test_server: FastMCP):
+async def test_tool_7_colab_disconnect_runtime_invalid_type(test_server: MCPServer):
     """Tier 2: Invalid type for runtime_id raises ToolError."""
     await require_tool(test_server, "colab_disconnect_runtime")
     with pytest.raises((ToolError, ValueError, TypeError)):
@@ -445,7 +455,7 @@ async def test_tool_7_colab_disconnect_runtime_invalid_type(test_server: FastMCP
 
 
 @pytest.mark.asyncio
-async def test_tool_colab_list_sessions_registered_and_valid(test_server: FastMCP, monkeypatch):
+async def test_tool_colab_list_sessions_registered_and_valid(test_server: MCPServer, monkeypatch):
     """Tier 1: colab_list_sessions returns active remote and local sessions."""
     await require_tool(test_server, "colab_list_sessions")
     from colab_mcp.runtime.models import ListSessionsResponse, SessionSummary
@@ -477,7 +487,7 @@ async def test_tool_colab_list_sessions_registered_and_valid(test_server: FastMC
 
 
 @pytest.mark.asyncio
-async def test_tool_colab_disconnect_runtime_all_mode(test_server: FastMCP):
+async def test_tool_colab_disconnect_runtime_all_mode(test_server: MCPServer):
     """Tier 1: colab_disconnect_runtime supports disconnect_all=True cleanly."""
     await require_tool(test_server, "colab_disconnect_runtime")
     result = await test_server.call_tool("colab_disconnect_runtime", {"disconnect_all": True})
@@ -514,7 +524,7 @@ class _MockKernelClient:
 
 
 @pytest.mark.asyncio
-async def test_tool_8_colab_execute_code_valid_sync(test_server: FastMCP):
+async def test_tool_8_colab_execute_code_valid_sync(test_server: MCPServer):
     """Tier 1: colab_execute_code synchronous returns MCP Content Blocks."""
     await require_tool(test_server, "colab_execute_code")
     mock_client = _MockKernelClient(text="Hello FastMCP\n")
@@ -530,7 +540,7 @@ async def test_tool_8_colab_execute_code_valid_sync(test_server: FastMCP):
 
 
 @pytest.mark.asyncio
-async def test_tool_8_colab_execute_code_async_mode(test_server: FastMCP):
+async def test_tool_8_colab_execute_code_async_mode(test_server: MCPServer):
     """Tier 1: colab_execute_code with wait_for_completion=False returns execution_id."""
     await require_tool(test_server, "colab_execute_code")
     mock_client = _MockKernelClient()
@@ -544,7 +554,7 @@ async def test_tool_8_colab_execute_code_async_mode(test_server: FastMCP):
 
 
 @pytest.mark.asyncio
-async def test_tool_8_colab_execute_code_missing_required_code(test_server: FastMCP):
+async def test_tool_8_colab_execute_code_missing_required_code(test_server: MCPServer):
     """Tier 2: Missing required 'code' argument raises ToolError."""
     await require_tool(test_server, "colab_execute_code")
     with pytest.raises((ToolError, ValueError, TypeError)):
@@ -552,7 +562,7 @@ async def test_tool_8_colab_execute_code_missing_required_code(test_server: Fast
 
 
 @pytest.mark.asyncio
-async def test_tool_8_colab_execute_code_invalid_timeout(test_server: FastMCP):
+async def test_tool_8_colab_execute_code_invalid_timeout(test_server: MCPServer):
     """Tier 2: Timeout < 5s raises ToolError / validation error."""
     await require_tool(test_server, "colab_execute_code")
     with pytest.raises((ToolError, ValueError)):
@@ -560,7 +570,7 @@ async def test_tool_8_colab_execute_code_invalid_timeout(test_server: FastMCP):
 
 
 @pytest.mark.asyncio
-async def test_tool_8_colab_execute_code_invalid_max_text_lines(test_server: FastMCP):
+async def test_tool_8_colab_execute_code_invalid_max_text_lines(test_server: MCPServer):
     """Tier 2: max_text_lines < 10 raises ToolError / validation error."""
     await require_tool(test_server, "colab_execute_code")
     with pytest.raises((ToolError, ValueError)):
@@ -570,7 +580,7 @@ async def test_tool_8_colab_execute_code_invalid_max_text_lines(test_server: Fas
 # --- Tool 9: colab_execute_notebook ---
 
 @pytest.mark.asyncio
-async def test_tool_9_colab_execute_notebook_valid_content(test_server: FastMCP):
+async def test_tool_9_colab_execute_notebook_valid_content(test_server: MCPServer):
     """Tier 1: colab_execute_notebook executes notebook JSON string."""
     await require_tool(test_server, "colab_execute_notebook")
     minimal_nb = {
@@ -599,7 +609,7 @@ async def test_tool_9_colab_execute_notebook_valid_content(test_server: FastMCP)
 
 
 @pytest.mark.asyncio
-async def test_tool_9_colab_execute_notebook_missing_both_inputs(test_server: FastMCP):
+async def test_tool_9_colab_execute_notebook_missing_both_inputs(test_server: MCPServer):
     """Tier 2: Missing both notebook_path and notebook_content raises ToolError."""
     await require_tool(test_server, "colab_execute_notebook")
     with pytest.raises((ToolError, ValueError)):
@@ -607,7 +617,7 @@ async def test_tool_9_colab_execute_notebook_missing_both_inputs(test_server: Fa
 
 
 @pytest.mark.asyncio
-async def test_tool_9_colab_execute_notebook_conflicting_inputs(test_server: FastMCP):
+async def test_tool_9_colab_execute_notebook_conflicting_inputs(test_server: MCPServer):
     """Tier 2: Providing both notebook_path and notebook_content raises ToolError."""
     await require_tool(test_server, "colab_execute_notebook")
     with pytest.raises((ToolError, ValueError)):
@@ -618,7 +628,7 @@ async def test_tool_9_colab_execute_notebook_conflicting_inputs(test_server: Fas
 
 
 @pytest.mark.asyncio
-async def test_tool_9_colab_execute_notebook_invalid_cell_indices_type(test_server: FastMCP):
+async def test_tool_9_colab_execute_notebook_invalid_cell_indices_type(test_server: MCPServer):
     """Tier 2: Non-list cell_indices raises ToolError."""
     await require_tool(test_server, "colab_execute_notebook")
     with pytest.raises((ToolError, ValueError, TypeError)):
@@ -631,7 +641,7 @@ async def test_tool_9_colab_execute_notebook_invalid_cell_indices_type(test_serv
 # --- Tool 10: colab_get_execution_status ---
 
 @pytest.mark.asyncio
-async def test_tool_10_colab_get_execution_status_valid(test_server: FastMCP):
+async def test_tool_10_colab_get_execution_status_valid(test_server: MCPServer):
     """Tier 1: colab_get_execution_status returns status for execution_id."""
     await require_tool(test_server, "colab_get_execution_status")
     mock_registry = {
@@ -651,7 +661,7 @@ async def test_tool_10_colab_get_execution_status_valid(test_server: FastMCP):
 
 
 @pytest.mark.asyncio
-async def test_tool_10_colab_get_execution_status_missing_required(test_server: FastMCP):
+async def test_tool_10_colab_get_execution_status_missing_required(test_server: MCPServer):
     """Tier 2: Missing execution_id raises ToolError."""
     await require_tool(test_server, "colab_get_execution_status")
     with pytest.raises((ToolError, ValueError, TypeError)):
@@ -659,7 +669,7 @@ async def test_tool_10_colab_get_execution_status_missing_required(test_server: 
 
 
 @pytest.mark.asyncio
-async def test_tool_10_colab_get_execution_status_invalid_type(test_server: FastMCP):
+async def test_tool_10_colab_get_execution_status_invalid_type(test_server: MCPServer):
     """Tier 2: Non-string execution_id raises ToolError."""
     await require_tool(test_server, "colab_get_execution_status")
     with pytest.raises((ToolError, ValueError, TypeError)):
@@ -669,7 +679,7 @@ async def test_tool_10_colab_get_execution_status_invalid_type(test_server: Fast
 # --- Tool 11: colab_get_cell_output ---
 
 @pytest.mark.asyncio
-async def test_tool_11_colab_get_cell_output_valid(test_server: FastMCP):
+async def test_tool_11_colab_get_cell_output_valid(test_server: MCPServer):
     """Tier 1: colab_get_cell_output returns Content Blocks."""
     await require_tool(test_server, "colab_get_cell_output")
     result = await test_server.call_tool("colab_get_cell_output", {"execution_id": "exec-abc-123"})
@@ -677,7 +687,7 @@ async def test_tool_11_colab_get_cell_output_valid(test_server: FastMCP):
 
 
 @pytest.mark.asyncio
-async def test_tool_11_colab_get_cell_output_missing_required(test_server: FastMCP):
+async def test_tool_11_colab_get_cell_output_missing_required(test_server: MCPServer):
     """Tier 2: Missing execution_id raises ToolError."""
     await require_tool(test_server, "colab_get_cell_output")
     with pytest.raises((ToolError, ValueError, TypeError)):
@@ -685,7 +695,7 @@ async def test_tool_11_colab_get_cell_output_missing_required(test_server: FastM
 
 
 @pytest.mark.asyncio
-async def test_tool_11_colab_get_cell_output_invalid_type(test_server: FastMCP):
+async def test_tool_11_colab_get_cell_output_invalid_type(test_server: MCPServer):
     """Tier 2: Non-boolean include_images raises ToolError."""
     await require_tool(test_server, "colab_get_cell_output")
     with pytest.raises((ToolError, ValueError, TypeError)):
@@ -698,7 +708,7 @@ async def test_tool_11_colab_get_cell_output_invalid_type(test_server: FastMCP):
 # --- Tool 12: colab_interrupt_execution ---
 
 @pytest.mark.asyncio
-async def test_tool_12_colab_interrupt_execution_valid(test_server: FastMCP):
+async def test_tool_12_colab_interrupt_execution_valid(test_server: MCPServer):
     """Tier 1: colab_interrupt_execution halts cell and reports state_reset."""
     await require_tool(test_server, "colab_interrupt_execution")
     mock_client = _MockKernelClient(runtime_id="colab-test-123")
@@ -710,7 +720,7 @@ async def test_tool_12_colab_interrupt_execution_valid(test_server: FastMCP):
 
 
 @pytest.mark.asyncio
-async def test_tool_12_colab_interrupt_execution_defaults(test_server: FastMCP):
+async def test_tool_12_colab_interrupt_execution_defaults(test_server: MCPServer):
     """Tier 1: colab_interrupt_execution defaults."""
     await require_tool(test_server, "colab_interrupt_execution")
     mock_client = _MockKernelClient(runtime_id="colab-default")
@@ -721,7 +731,7 @@ async def test_tool_12_colab_interrupt_execution_defaults(test_server: FastMCP):
 
 
 @pytest.mark.asyncio
-async def test_tool_12_colab_interrupt_execution_invalid_type(test_server: FastMCP):
+async def test_tool_12_colab_interrupt_execution_invalid_type(test_server: MCPServer):
     """Tier 2: Non-string runtime_id raises ToolError."""
     await require_tool(test_server, "colab_interrupt_execution")
     with pytest.raises((ToolError, ValueError, TypeError)):

@@ -57,7 +57,7 @@
    - 6.3 [Error Handling Policies & State Propagation](#63-error-handling-policies--state-propagation)
    - 6.4 [In-Memory Execution State & Disk Serialization](#64-in-memory-execution-state--disk-serialization)
 7. [MCP Server Specification & Tool Schemas](#7-mcp-server-specification--tool-schemas)
-   - 7.1 [Technology Stack Justification: Python FastMCP vs TypeScript](#71-technology-stack-justification-python-fastmcp-vs-typescript)
+   - 7.1 [Technology Stack Justification: Python MCPServer vs TypeScript](#71-technology-stack-justification-python-mcpserver-vs-typescript)
    - 7.2 [Dual Transport Engine: Stdio & Server-Sent Events (SSE)](#72-dual-transport-engine-stdio--server-sent-events-sse)
      - 7.2.1 [Stdio Transport & Absolute Stdout Isolation](#721-stdio-transport--absolute-stdout-isolation)
      - 7.2.2 [SSE Transport for Remote/Hub Deployments](#722-sse-transport-for-remotehub-deployments)
@@ -1302,10 +1302,10 @@ The updated notebook tree is atomically written to `output_save_path` using `nbf
 
 ## 7. MCP Server Specification & Tool Schemas
 
-### 7.1 Technology Stack Justification: Python FastMCP vs TypeScript
+### 7.1 Technology Stack Justification: Python MCPServer vs TypeScript
 The implementation technology was evaluated across Python and TypeScript MCP SDKs:
 
-| Dimension | Python (`mcp.server.fastmcp.FastMCP`) | TypeScript (`@modelcontextprotocol/sdk`) | Architectural Decision |
+| Dimension | Python (`mcp.server.mcpserver.MCPServer`) | TypeScript (`@modelcontextprotocol/sdk`) | Architectural Decision |
 |---|---|---|---|
 | **Ecosystem Synergy** | **Native**. First-party integration with `nbformat`, `jupyter_client`, and PyData tools. | **Complex**. Requires `@jupyterlab/services` and Node.js-based polyfills. | **Python** provides 100% native compatibility with Jupyter notebook ASTs. |
 | **Schema Generation** | Automatic generation from Pydantic models & type annotations. | Zod schemas with manual JSON-RPC adapters. | **Python** reduces schema divergence and maintenance overhead. |
@@ -1321,7 +1321,7 @@ For local AI assistants (Claude Desktop, Cursor, Antigravity), `stdio` is the st
 - **Guaranteed Isolation Architecture:**
   1. `colabmcp` intercepts `sys.stdout` immediately upon process startup.
   2. All standard logging handlers (`logging.StreamHandler`) are explicitly bound to `stream=sys.stderr`.
-  3. `FastMCP` takes exclusive ownership of the underlying raw stdout stream for JSON-RPC frame delivery.
+  3. `MCPServer` takes exclusive ownership of the underlying raw stdout stream for JSON-RPC frame delivery.
 
 #### 7.2.2 SSE Transport for Remote/Hub Deployments
 For remote deployment, Docker containers, or multi-agent hubs, `colabmcp` provides an HTTP Server-Sent Events (SSE) transport:

@@ -1,12 +1,12 @@
 """
-FastMCP Tool implementations for Colab Authentication.
+MCP Tool implementations for Colab Authentication.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from colab_mcp.auth import cdp_browser, keystore, oauth
 from colab_mcp.auth.models import (
@@ -277,8 +277,8 @@ async def colab_logout_impl(
     )
 
 
-def register_auth_tools(mcp: FastMCP) -> None:
-    """Register all authentication tools on the FastMCP instance."""
+def register_auth_tools(mcp: MCPServer) -> None:
+    """Register all authentication tools on the MCPServer instance."""
 
     @mcp.tool(
         name="colab_login",

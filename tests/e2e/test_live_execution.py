@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 import pytest
 
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ImageContent, TextContent
 
 from colab_mcp.auth.keystore import (
@@ -172,7 +172,11 @@ async def test_scenario_1_complete_agent_ml_training_lifecycle(
     assert "loss" in first_text.lower() or "epoch" in first_text.lower()
 
     loss_chart = image_blocks[0]
-    chart_mime = getattr(loss_chart, "mimeType", None) or (loss_chart.get("mimeType") if isinstance(loss_chart, dict) else None)
+    chart_mime = (
+        getattr(loss_chart, "mime_type", None)
+        or getattr(loss_chart, "mimeType", None)
+        or (loss_chart.get("mimeType") if isinstance(loss_chart, dict) else None)
+    )
     chart_data = getattr(loss_chart, "data", None) or (loss_chart.get("data") if isinstance(loss_chart, dict) else None)
     assert chart_mime == "image/png"
     assert chart_data is not None and len(chart_data) > 20
@@ -516,7 +520,7 @@ async def test_scenario_6_free_tier_quota_guard_and_graceful_fallback(
             {"accelerator": "NONE", "high_ram": True, "auth_user_index": 0},
         )
         data = extract_result_dict(res)
-        if "error" in data or data.get("isError") or "HighRamNotAvailableError" in str(data):
+        if "error" in data or data.get("is_error") or data.get("isError") or "HighRamNotAvailableError" in str(data):
             raise ValueError(f"HighRamNotAvailableError: {data}")
         pytest.fail("colab_connect_runtime(high_ram=True) must fail on Free Tier accounts")
     except (ToolError, HighRamNotAvailableError, ValueError, Exception) as exc:

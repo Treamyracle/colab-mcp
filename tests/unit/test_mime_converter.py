@@ -117,7 +117,7 @@ def test_convert_png_display_data_produces_image_content():
     assert len(blocks) == 1
     assert isinstance(blocks[0], ImageContent)
     assert blocks[0].type == "image"
-    assert blocks[0].mimeType == "image/png"
+    assert blocks[0].mime_type == "image/png"
     assert blocks[0].data.strip() == SAMPLE_PNG_B64.strip()
 
 
@@ -136,7 +136,7 @@ def test_convert_jpeg_display_data_produces_image_content():
     assert len(blocks) == 1
     assert isinstance(blocks[0], ImageContent)
     assert blocks[0].type == "image"
-    assert blocks[0].mimeType == "image/jpeg"
+    assert blocks[0].mime_type == "image/jpeg"
     assert blocks[0].data.strip() == SAMPLE_JPEG_B64.strip()
 
 
@@ -169,11 +169,11 @@ def test_chronological_interleaved_emission_order():
     assert isinstance(blocks[0], TextContent)
     assert "Step 1" in blocks[0].text
     assert isinstance(blocks[1], ImageContent)
-    assert blocks[1].mimeType == "image/png"
+    assert blocks[1].mime_type == "image/png"
     assert isinstance(blocks[2], TextContent)
     assert "Step 2" in blocks[2].text
     assert isinstance(blocks[3], ImageContent)
-    assert blocks[3].mimeType == "image/jpeg"
+    assert blocks[3].mime_type == "image/jpeg"
 
 
 def test_convert_execute_result_text_plain_produces_text_content():
@@ -291,7 +291,7 @@ def test_multi_mime_display_data_prioritizes_image():
     blocks = _convert(messages)
     image_blocks = [b for b in blocks if isinstance(b, ImageContent)]
     assert len(image_blocks) == 1
-    assert image_blocks[0].mimeType == "image/png"
+    assert image_blocks[0].mime_type == "image/png"
 
 
 def test_unknown_or_corrupted_mime_payload_handled_gracefully():

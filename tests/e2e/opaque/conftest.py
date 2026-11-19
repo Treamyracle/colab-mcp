@@ -30,9 +30,9 @@ import requests
 import uvicorn
 import websockets
 from mcp import ClientSession
+from mcp.client._memory import InMemoryTransport
 from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, get_default_environment, stdio_client
-from mcp.shared.memory import create_connected_server_and_client_session
 from typer.testing import CliRunner
 
 from colab_mcp.auth.oauth import _ACTIVE_REMOTE_FLOWS
@@ -252,8 +252,10 @@ def mcp_session(colab_twin: ColabTwin, tmp_path: Path) -> Callable[..., Any]:
     ) -> AsyncGenerator[ClientSession, None]:
         if transport == "memory":
             server = create_server(server_name)
-            async with create_connected_server_and_client_session(server) as session:
-                yield session
+            async with InMemoryTransport(server) as (read_stream, write_stream):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    yield session
             return
 
         if transport == "sse":

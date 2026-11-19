@@ -53,11 +53,11 @@ def extract_image_blocks(result_or_blocks: Union[CallToolResult, List[Any]]) -> 
 
 def parse_tool_json(result: CallToolResult) -> Dict[str, Any]:
     """Assert CallToolResult succeeded and parse its JSON payload."""
-    if result.isError:
+    if result.is_error:
         err_text = extract_blocks_text(result)
-        raise AssertionError(f"Expected tool success, got isError=True: {err_text}")
-    if result.structuredContent is not None:
-        return dict(result.structuredContent)
+        raise AssertionError(f"Expected tool success, got is_error=True: {err_text}")
+    if result.structured_content is not None:
+        return dict(result.structured_content)
     raw = extract_blocks_text(result)
     try:
         parsed = json.loads(raw)
@@ -70,16 +70,16 @@ def parse_tool_json(result: CallToolResult) -> Dict[str, Any]:
 
 def parse_tool_blocks(result: CallToolResult) -> List[Any]:
     """Assert CallToolResult succeeded and return chronological content blocks."""
-    if result.isError:
+    if result.is_error:
         err_text = extract_blocks_text(result)
-        raise AssertionError(f"Expected tool success, got isError=True: {err_text}")
+        raise AssertionError(f"Expected tool success, got is_error=True: {err_text}")
     return list(result.content)
 
 
 def assert_tool_error(result: CallToolResult, *substrings: str) -> str:
-    """Assert CallToolResult failed (isError=True) and optionally match substrings."""
-    assert result.isError is True, (
-        f"Expected tool error (isError=True), got success: {extract_blocks_text(result)!r}"
+    """Assert CallToolResult failed (is_error=True) and optionally match substrings."""
+    assert result.is_error is True, (
+        f"Expected tool error (is_error=True), got success: {extract_blocks_text(result)!r}"
     )
     err_text = extract_blocks_text(result)
     lowered = err_text.lower()

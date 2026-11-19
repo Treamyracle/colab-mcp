@@ -1,5 +1,5 @@
 """
-FastMCP Server implementation for Google Colab automation.
+MCP Server implementation for Google Colab automation (MCP SDK v2).
 """
 
 from __future__ import annotations
@@ -10,8 +10,8 @@ from functools import wraps
 from typing import Any, AsyncIterator
 
 import anyio
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.types import CallToolResult, ImageContent, TextContent
 from pydantic import BaseModel
 
@@ -72,18 +72,18 @@ def _redact_content_block(block: Any) -> Any:
 
 
 def _redact_tool_output(result: Any) -> Any:
-    """Recursively redact sensitive credentials from any FastMCP tool dispatch output."""
+    """Recursively redact sensitive credentials from any MCPServer tool dispatch output."""
     if isinstance(result, CallToolResult):
         redacted_content = [_redact_content_block(b) for b in result.content]
         redacted_structured = (
-            redact_data(result.structuredContent)
-            if result.structuredContent is not None
+            redact_data(result.structured_content)
+            if result.structured_content is not None
             else None
         )
         return result.model_copy(
             update={
                 "content": redacted_content,
-                "structuredContent": redacted_structured,
+                "structured_content": redacted_structured,
             }
         )
     if isinstance(result, tuple):
@@ -109,8 +109,15 @@ def _redact_tool_output(result: Any) -> Any:
     return result
 
 
-def _install_egress_redaction(mcp_server: FastMCP) -> None:
-    """Wrap FastMCP ToolManager.call_tool with a global egress credential redaction filter."""
+def _is_domain_error(exc: BaseException) -> bool:
+    """Return True if *exc* is an actionable colab_mcp or input validation exception."""
+    if type(exc).__module__.startswith("colab_mcp."):
+        return True
+    return isinstance(exc, (ValueError, TypeError, FileNotFoundError, PermissionError, TimeoutError, RuntimeError))
+
+
+def _install_egress_redaction(mcp_server: MCPServer) -> None:
+    """Wrap MCPServer ToolManager.call_tool with a global egress credential redaction filter."""
     tool_manager = getattr(mcp_server, "_tool_manager", None)
     if tool_manager is None:
         return
@@ -133,6 +140,15 @@ def _install_egress_redaction(mcp_server: FastMCP) -> None:
                 convert_result=convert_result,
             )
             return _redact_tool_output(raw_result)
+        except UnexpectedToolError as exc:
+            cause = exc.__cause__
+            if cause is not None and _is_domain_error(cause):
+                safe_cause = redact_credentials(str(cause))
+                raise ToolError(f"{exc}: {safe_cause}") from None
+            safe_msg = redact_credentials(str(exc))
+            if safe_msg != str(exc):
+                raise UnexpectedToolError(safe_msg) from None
+            raise
         except ToolError as exc:
             safe_msg = redact_credentials(str(exc))
             if safe_msg != str(exc):
@@ -152,7 +168,7 @@ def _install_egress_redaction(mcp_server: FastMCP) -> None:
 
 
 @asynccontextmanager
-async def lifespan(_server: FastMCP) -> AsyncIterator[None]:
+async def lifespan(_server: MCPServer) -> AsyncIterator[None]:
     """Manage server startup and guaranteed clean shutdown of kernel/session resources."""
     try:
         yield
@@ -177,20 +193,19 @@ def create_server(
     host: str = "127.0.0.1",
     port: int = 8000,
     log_level: str = "INFO",
-) -> FastMCP:
-    """Create and configure a FastMCP server instance exposing all 12 Colab MCP tools."""
+) -> MCPServer:
+    """Create and configure an MCPServer instance exposing all Colab MCP tools."""
     normalized_level = _normalize_log_level(log_level)
-    validated_port = _validate_port(port)
+    _validate_port(port)
+    _ = host  # Validated/passed through run_server(transport="sse", host=..., port=...)
     setup_logging(level=getattr(logging, normalized_level, logging.INFO))
 
-    server = FastMCP(
+    server = MCPServer(
         name=name,
         instructions=(
             "Google Colab Model Context Protocol server enabling cloud runtime management, "
             "Jupyter kernel code execution, and nbformat v4 notebook orchestration."
         ),
-        host=host,
-        port=validated_port,
         log_level=normalized_level,  # type: ignore[arg-type]
         lifespan=lifespan,
     )
@@ -211,7 +226,7 @@ def run_server(
     port: int = 8000,
     log_level: str = "INFO",
 ) -> None:
-    """Validate transport/network configuration and run the FastMCP server."""
+    """Validate transport/network configuration and run the MCPServer."""
     if not isinstance(transport, str):
         raise ValueError("transport must be a string ('stdio' or 'sse').")
     normalized_transport = transport.strip().lower()
@@ -228,7 +243,10 @@ def run_server(
         port=validated_port,
         log_level=normalized_level,
     )
-    server.run(transport=normalized_transport)  # type: ignore[arg-type]
+    if normalized_transport == "sse":
+        server.run(transport=normalized_transport, host=host, port=validated_port)  # type: ignore[arg-type]
+    else:
+        server.run(transport=normalized_transport)  # type: ignore[arg-type]
 
 
 # Default singleton server instance

@@ -17,7 +17,7 @@ import uuid
 from typing import Annotated, Any, Awaitable, Callable, Dict, List, Mapping, Optional
 from unittest.mock import NonCallableMock
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, ImageContent, TextContent
 from pydantic import BaseModel, StrictBool
 
@@ -842,8 +842,8 @@ async def colab_interrupt_execution(
 # ============================================================================
 
 
-def register_kernel_tools(mcp: FastMCP) -> None:
-    """Register Tools 8, 10, 11, and 12 on the FastMCP server."""
+def register_kernel_tools(mcp: MCPServer) -> None:
+    """Register Tools 8, 10, 11, and 12 on the MCPServer."""
 
     @mcp.tool(
         name="colab_execute_code",
@@ -875,7 +875,7 @@ def register_kernel_tools(mcp: FastMCP) -> None:
             max_images=max_images,
         )
         if has_error and isinstance(payload, list):
-            return CallToolResult(content=payload, isError=True)  # type: ignore[arg-type]
+            return CallToolResult(content=payload, is_error=True)  # type: ignore[arg-type]
         return payload
 
     @mcp.tool(
@@ -903,8 +903,8 @@ def register_kernel_tools(mcp: FastMCP) -> None:
             payload = redact_data(model.model_dump(mode="json"))
             return CallToolResult(
                 content=[TextContent(type="text", text=json.dumps(payload, indent=2))],
-                structuredContent=payload,
-                isError=True,
+                structured_content=payload,
+                is_error=True,
             )  # type: ignore[return-value]
         return ExecutionStatusResponse(**data)
 
@@ -931,7 +931,7 @@ def register_kernel_tools(mcp: FastMCP) -> None:
             max_images=max_images,
         )
         if has_error:
-            return CallToolResult(content=blocks, isError=True)  # type: ignore[arg-type]
+            return CallToolResult(content=blocks, is_error=True)  # type: ignore[arg-type]
         return blocks
 
     @mcp.tool(

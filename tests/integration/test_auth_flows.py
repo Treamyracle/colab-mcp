@@ -175,10 +175,13 @@ async def test_fastmcp_tool_listing(fastmcp_test_server):
 
 @pytest.mark.asyncio
 async def test_fastmcp_call_tool_via_server(fastmcp_test_server, mock_keystore_dir, mock_keyring, mock_machine_id):
-    # Call colab_login step 1 through fastmcp.call_tool
+    # Call colab_login step 1 through MCPServer.call_tool (returns CallToolResult)
     result = await fastmcp_test_server.call_tool("colab_login", {"method": "oauth_remote", "auth_user_index": 0})
-    # result is a tuple of (content, context) or list of Content blocks
-    text_content = result[0][0].text if isinstance(result, tuple) else result[0].text
+    text_content = (
+        result.content[0].text
+        if hasattr(result, "content")
+        else (result[0][0].text if isinstance(result, tuple) else result[0].text)
+    )
     data = json.loads(text_content)
     assert data["status"] == "authorization_required"
     assert "https://accounts.google.com/o/oauth2/" in data["auth_url"]

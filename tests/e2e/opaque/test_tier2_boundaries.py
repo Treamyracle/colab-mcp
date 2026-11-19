@@ -560,7 +560,7 @@ async def test_t2_fa4_execute_code_timeout_dispatches_sigint(
             "colab_execute_code",
             {"code": "import time\ntime.sleep(20)", "runtime_id": conn["runtime_id"], "timeout_seconds": 5},
         )
-        assert res.isError is True
+        assert res.is_error is True
         assert len(colab_twin.state.interrupted_kernels) >= 1
 
 

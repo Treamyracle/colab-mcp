@@ -46,7 +46,7 @@ src/colab_mcp/
 ├── notebook/   # nbformat v4 loader, path guards, cell-by-cell runner
 ├── files/      # VM file transfer (Contents API + chunked kernel) & Google Drive v3
 ├── utils/      # stderr-only logging isolation, nbh generator, credential redaction
-├── server.py   # FastMCP server, lifespan, stdio/sse transports, egress redaction
+├── server.py   # MCPServer (v2), lifespan, stdio/sse transports, egress redaction
 └── cli.py      # Typer CLI entrypoints
 ```
 

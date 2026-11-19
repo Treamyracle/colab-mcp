@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Generator, Tuple
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from colab_mcp.auth.models import AuthMethod, GoogleCredentials
 from colab_mcp.auth.tools import register_auth_tools
@@ -99,9 +99,9 @@ def sample_expiring_soon_credentials() -> GoogleCredentials:
 
 
 @pytest.fixture
-def fastmcp_test_server() -> FastMCP:
-    """FastMCP test server with auth tools registered."""
-    server = FastMCP("test-colab-mcp")
+def fastmcp_test_server() -> MCPServer:
+    """MCPServer test server with auth tools registered."""
+    server = MCPServer("test-colab-mcp")
     register_auth_tools(server)
     return server
 

@@ -508,7 +508,7 @@ async def test_t1_fa3_execute_code_chronological_multimodal_output(mcp_session: 
         assert "BEFORE_PLOT_LOG" in before_text
         assert "AFTER_PLOT_LOG" in after_text
         imgs = extract_image_blocks(blocks)
-        assert imgs[0].mimeType == "image/png"
+        assert imgs[0].mime_type == "image/png"
         assert len(imgs[0].data) > 20
 
 
@@ -737,7 +737,7 @@ async def test_t1_fa4_post_restart_ws_reconnect_clean_namespace(mcp_session: Any
         await asyncio.gather(hung_task, return_exceptions=True)
 
         check_err = await session.call_tool("colab_execute_code", {"code": "print(wiped_var)", "runtime_id": rid})
-        assert check_err.isError is True
+        assert check_err.is_error is True
         assert "NameError" in extract_blocks_text(check_err)
 
         ok = await session.call_tool("colab_execute_code", {"code": "print('reconnected-ok')", "runtime_id": rid})
@@ -938,7 +938,7 @@ async def test_t1_fa6_list_all_12_tools_with_valid_schemas(mcp_session: Any) -> 
         for name in ALL_12_TOOLS:
             t = by_name[name]
             assert t.description and len(t.description) > 10
-            assert t.inputSchema.get("type") == "object"
+            assert t.input_schema.get("type") == "object"
 
 
 @pytest.mark.asyncio

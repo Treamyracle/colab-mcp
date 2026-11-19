@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
 import httpx
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from colab_mcp.auth.oauth import get_valid_auth_headers
 from colab_mcp.files.models import (
@@ -691,8 +691,8 @@ async def drive_upload_impl(
     )
 
 
-def register_file_tools(mcp: FastMCP) -> None:
-    """Register Colab VM file transfer and Google Drive MCP tools on FastMCP."""
+def register_file_tools(mcp: MCPServer) -> None:
+    """Register Colab VM file transfer and Google Drive MCP tools on MCPServer."""
 
     @mcp.tool(
         name="colab_list_files",

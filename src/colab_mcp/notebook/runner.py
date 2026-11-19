@@ -24,7 +24,7 @@ from typing import Annotated, Any, Awaitable, Callable, Dict, List, Literal, Opt
 import nbformat
 import nbformat.v4
 import nbformat.validator
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.types import ImageContent, TextContent
 from pydantic import BaseModel, BeforeValidator, Field, StrictBool, StrictInt
 
@@ -502,7 +502,11 @@ def _convert_mcp_blocks_to_nb_outputs(
         elif isinstance(block, ImageContent) or (
             getattr(block, "type", None) == "image" and hasattr(block, "data")
         ):
-            mime = str(getattr(block, "mimeType", "image/png") or "image/png")
+            mime = str(
+                getattr(block, "mime_type", None)
+                or getattr(block, "mimeType", None)
+                or "image/png"
+            )
             img_data = str(getattr(block, "data", "") or "")
             sanitized_data = _sanitize_mime_data({mime: img_data})
             plot_count += _count_image_plots(sanitized_data)
@@ -994,21 +998,21 @@ async def colab_execute_notebook(
 
 def _coerce_pre_parsed_json_str(value: Any) -> Any:
     """
-    Reverse FastMCP's ``pre_parse_json`` coercion when a JSON notebook string
+    Reverse MCPServer's ``pre_parse_json`` coercion when a JSON notebook string
     was eagerly parsed into a ``dict``/``list`` for an ``Optional[str]`` field.
 
-    Note: ``mcp.server.fastmcp.utilities.func_metadata.FuncMetadata.pre_parse_json``
+    Note: ``mcp.server.mcpserver.utilities.func_metadata.FuncMetadata.pre_parse_json``
     unconditionally evaluates ``json.loads("null") -> None`` for any ``Optional[str]``
     annotation before Pydantic validators run, so literal ``"null"`` strings arrive as
-    ``None`` here without monkeypatching FastMCP internals.
+    ``None`` here without monkeypatching MCPServer internals.
     """
     if isinstance(value, (dict, list)):
         return json.dumps(value)
     return value
 
 
-def register_notebook_tools(mcp: FastMCP) -> None:
-    """Register Tool 9 (``colab_execute_notebook``) on the FastMCP server."""
+def register_notebook_tools(mcp: MCPServer) -> None:
+    """Register Tool 9 (``colab_execute_notebook``) on the MCPServer."""
 
     @mcp.tool(
         name="colab_execute_notebook",

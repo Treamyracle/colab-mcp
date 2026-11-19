@@ -11,8 +11,8 @@ from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, ImageContent, TextContent
 
 from colab_mcp.kernel.mime_converter import convert_iopub_to_mcp_blocks
@@ -43,13 +43,23 @@ SAMPLE_PNG_B64 = (
 
 
 def _extract_result_dict(tool_result: Any) -> Dict[str, Any]:
+    if isinstance(tool_result, CallToolResult):
+        if tool_result.structured_content is not None:
+            return dict(tool_result.structured_content)
+        if tool_result.content:
+            raw_text = getattr(tool_result.content[0], "text", "")
+            try:
+                parsed = json.loads(raw_text)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+            return {"text": raw_text}
     if isinstance(tool_result, tuple) and len(tool_result) > 1 and isinstance(tool_result[1], dict):
         return tool_result[1]
     blocks = tool_result[0] if isinstance(tool_result, tuple) else tool_result
     if isinstance(blocks, list) and blocks and hasattr(blocks[0], "text"):
         return json.loads(blocks[0].text)
-    if isinstance(tool_result, CallToolResult) and tool_result.content:
-        return {"text": getattr(tool_result.content[0], "text", "")}
     raise AssertionError(f"Unexpected tool_result shape: {tool_result!r}")
 
 
@@ -85,8 +95,8 @@ def registered_runtime():
 
 
 @pytest.fixture
-def kernel_mcp_server() -> FastMCP:
-    mcp = FastMCP("kernel-tools-unit-test")
+def kernel_mcp_server() -> MCPServer:
+    mcp = MCPServer("kernel-tools-unit-test")
     register_kernel_tools(mcp)
     return mcp
 
@@ -121,7 +131,7 @@ async def test_execute_code_sync_chronological_and_activity_reset(registered_run
 
 @pytest.mark.asyncio
 async def test_execute_code_async_dispatch_and_fastmcp_no_wrapper(
-    registered_runtime, kernel_mcp_server: FastMCP
+    registered_runtime, kernel_mcp_server: MCPServer
 ):
     _, record = registered_runtime
 
@@ -161,7 +171,7 @@ async def test_execute_code_unconnected_runtime_raises():
 
 @pytest.mark.asyncio
 async def test_execute_code_timeout_returns_error_call_tool_result(
-    registered_runtime, kernel_mcp_server: FastMCP
+    registered_runtime, kernel_mcp_server: MCPServer
 ):
     _, record = registered_runtime
     mock_client = AsyncMock()
@@ -174,7 +184,7 @@ async def test_execute_code_timeout_returns_error_call_tool_result(
             {"code": "while True: pass", "timeout_seconds": 5},
         )
     assert isinstance(res, CallToolResult)
-    assert res.isError is True
+    assert res.is_error is True
     assert "Timed out" in res.content[0].text
 
 
@@ -196,7 +206,7 @@ async def test_execute_code_timeout_returns_error_call_tool_result(
         {},
     ],
 )
-async def test_execute_code_bounds_and_type_validation(kernel_mcp_server: FastMCP, args):
+async def test_execute_code_bounds_and_type_validation(kernel_mcp_server: MCPServer, args):
     with pytest.raises((ToolError, ValueError, TypeError)):
         await kernel_mcp_server.call_tool("colab_execute_code", args)
 
@@ -208,7 +218,7 @@ async def test_execute_code_bounds_and_type_validation(kernel_mcp_server: FastMC
 
 @pytest.mark.asyncio
 async def test_execution_status_and_cell_output_filtering_and_truncation(
-    registered_runtime, kernel_mcp_server: FastMCP
+    registered_runtime, kernel_mcp_server: MCPServer
 ):
     _, record = registered_runtime
     record.last_activity_time = 2.0
@@ -272,7 +282,7 @@ async def test_execution_status_and_cell_output_filtering_and_truncation(
 
 
 @pytest.mark.asyncio
-async def test_status_and_output_unknown_id_and_strict_bool(kernel_mcp_server: FastMCP):
+async def test_status_and_output_unknown_id_and_strict_bool(kernel_mcp_server: MCPServer):
     st = await colab_get_execution_status("exec-does-not-exist")
     assert st["status"] == "not_found"
 
@@ -299,7 +309,7 @@ async def test_status_and_output_unknown_id_and_strict_bool(kernel_mcp_server: F
 
 @pytest.mark.asyncio
 async def test_interrupt_execution_tier1_and_tier2_session_sync(
-    registered_runtime, kernel_mcp_server: FastMCP
+    registered_runtime, kernel_mcp_server: MCPServer
 ):
     _, record = registered_runtime
 
@@ -385,7 +395,7 @@ def test_mime_converter_redaction_and_html_conversion():
 
 
 @pytest.mark.asyncio
-async def test_fastmcp_tool_registration_schemas(kernel_mcp_server: FastMCP):
+async def test_fastmcp_tool_registration_schemas(kernel_mcp_server: MCPServer):
     tools = await kernel_mcp_server.list_tools()
     by_name = {t.name: t for t in tools}
     assert set(by_name.keys()) == {
@@ -394,8 +404,8 @@ async def test_fastmcp_tool_registration_schemas(kernel_mcp_server: FastMCP):
         "colab_get_cell_output",
         "colab_interrupt_execution",
     }
-    assert by_name["colab_execute_code"].inputSchema["properties"]["wait_for_completion"]["type"] == "boolean"
-    assert by_name["colab_get_cell_output"].inputSchema["properties"]["include_images"]["type"] == "boolean"
+    assert by_name["colab_execute_code"].input_schema["properties"]["wait_for_completion"]["type"] == "boolean"
+    assert by_name["colab_get_cell_output"].input_schema["properties"]["include_images"]["type"] == "boolean"
 
 
 @pytest.mark.asyncio
