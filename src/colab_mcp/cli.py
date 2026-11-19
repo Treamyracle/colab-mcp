@@ -367,5 +367,74 @@ def logout(
         _exit_with_error(exc)
 
 
+@app.command("set-secret")
+def set_secret_cmd(
+    name: str = typer.Argument(..., help="Secret identifier (e.g. HF_TOKEN, WANDB_API_KEY)."),
+    value: Optional[str] = typer.Option(
+        None,
+        "--value",
+        "-v",
+        help="Secret value. Omit to enter securely via hidden prompt.",
+    ),
+) -> None:
+    """Encrypt and store a secret/token in the colab-mcp vault."""
+    from colab_mcp.auth.secrets import set_secret
+
+    try:
+        secret_value = value
+        if secret_value is None:
+            _ensure_cli_stdout()
+            secret_value = typer.prompt(f"Enter value for {name}", hide_input=True)
+        meta = set_secret(name=name, value=secret_value)
+        _echo_json({
+            "status": "stored",
+            "name": meta.name,
+            "masked_preview": meta.masked_preview,
+            "length": meta.length,
+            "updated_at": meta.updated_at.isoformat(),
+        })
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        _exit_with_error(exc)
+
+
+@app.command("list-secrets")
+def list_secrets_cmd() -> None:
+    """List stored secret names and masked previews from the colab-mcp vault."""
+    from colab_mcp.auth.secrets import list_secrets
+
+    try:
+        items = list_secrets()
+        _echo_json({
+            "count": len(items),
+            "secrets": [m.model_dump(mode="json") for m in items],
+        })
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        _exit_with_error(exc)
+
+
+@app.command("delete-secret")
+def delete_secret_cmd(
+    name: str = typer.Argument(..., help="Secret name to remove from the vault."),
+) -> None:
+    """Delete a stored secret/token from the colab-mcp vault."""
+    from colab_mcp.auth.secrets import delete_secret
+
+    try:
+        existed = delete_secret(name=name)
+        _echo_json({
+            "status": "deleted",
+            "name": name.strip(),
+            "existed": existed,
+        })
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        _exit_with_error(exc)
+
+
 if __name__ == "__main__":
     app()

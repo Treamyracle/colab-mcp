@@ -25,10 +25,12 @@ from colab_mcp.runtime.models import (
     ColabRuntimeError,
     ConnectRuntimeResponse,
     DisconnectRuntimeResponse,
+    GpuMetric,
     ListRuntimeTypesResponse,
     ListSessionsResponse,
     RuntimeStatusResponse,
     SessionSummary,
+    SystemMetricsResponse,
     coerce_accelerator,
     get_accelerator_catalog,
     resolve_variant,
@@ -585,6 +587,88 @@ async def colab_disconnect_runtime(
     )
 
 
+async def get_system_metrics_impl(
+    runtime_id: Optional[str] = None,
+    *,
+    _client_getter: Optional[Any] = None,
+) -> SystemMetricsResponse:
+    """Query GPU VRAM/utilization, system RAM, and disk usage on the active Colab VM."""
+    import json as _json
+    from colab_mcp.kernel.colab_shims import build_system_metrics_probe_code
+    from colab_mcp.kernel.tools import get_active_kernel_client
+
+    if runtime_id is not None and not isinstance(runtime_id, str):
+        raise ValueError("runtime_id must be a string or None.")
+
+    getter = _client_getter or get_active_kernel_client
+    client = await getter(runtime_id)
+    effective_runtime = getattr(client, "runtime_id", None) or getattr(client, "endpoint", None) or runtime_id
+    get_session_manager().record_activity(endpoint=effective_runtime)
+
+    probe_code = build_system_metrics_probe_code()
+    if hasattr(client, "execute_raw"):
+        raw = await client.execute_raw(
+            code=probe_code,
+            timeout_seconds=20,
+            store_history=False,
+            stop_on_error=True,
+            silent=False,
+            allow_stdin=False,
+        )
+        chunks: list[str] = []
+        for msg in getattr(raw, "iopub_messages", []) or []:
+            if not isinstance(msg, dict):
+                continue
+            hdr = msg.get("header") or {}
+            if hdr.get("msg_type") == "stream":
+                chunks.append(str((msg.get("content") or {}).get("text", "")))
+        raw_text = "".join(chunks)
+    else:
+        blocks = await client.execute(
+            code=probe_code,
+            timeout_seconds=20,
+            store_history=False,
+        )
+        raw_text = "\n".join(getattr(b, "text", "") for b in (blocks or []) if getattr(b, "type", None) == "text")
+
+    parsed: Dict[str, Any] = {}
+    for line in reversed(raw_text.strip().splitlines()):
+        line_str = line.strip()
+        if line_str.startswith("{") and line_str.endswith("}"):
+            try:
+                parsed = _json.loads(line_str)
+                break
+            except Exception:
+                continue
+
+    if not parsed:
+        raise ColabRuntimeError(
+            f"Unable to parse system metrics JSON output from runtime: {raw_text[:200]!r}"
+        )
+
+    gpus = [GpuMetric(**g) for g in (parsed.get("gpus") or []) if isinstance(g, dict)]
+    return SystemMetricsResponse(
+        runtime_id=effective_runtime,
+        gpus=gpus,
+        ram_total_mb=parsed.get("ram_total_mb"),
+        ram_used_mb=parsed.get("ram_used_mb"),
+        ram_free_mb=parsed.get("ram_free_mb"),
+        ram_utilization_percent=parsed.get("ram_utilization_percent"),
+        disk_path=str(parsed.get("disk_path") or "/content"),
+        disk_total_gb=parsed.get("disk_total_gb"),
+        disk_used_gb=parsed.get("disk_used_gb"),
+        disk_free_gb=parsed.get("disk_free_gb"),
+        disk_utilization_percent=parsed.get("disk_utilization_percent"),
+    )
+
+
+async def colab_get_system_metrics(
+    runtime_id: Optional[str] = None,
+) -> SystemMetricsResponse:
+    """Measure GPU VRAM/utilization, system RAM, and disk space on an active Colab VM."""
+    return await get_system_metrics_impl(runtime_id=runtime_id)
+
+
 def register_runtime_tools(mcp: MCPServer) -> None:
     """Register all runtime lifecycle MCP tools on the MCPServer."""
 
@@ -668,16 +752,30 @@ def register_runtime_tools(mcp: MCPServer) -> None:
             auth_user_index=auth_user_index,
         )
 
+    @mcp.tool(
+        name="colab_get_system_metrics",
+        description=(
+            "Inspect live GPU VRAM usage, GPU utilization %, system RAM, and /content disk usage "
+            "on the connected Google Colab VM without perturbing execution history."
+        ),
+    )
+    async def _tool_colab_get_system_metrics(
+        runtime_id: Optional[str] = None,
+    ) -> SystemMetricsResponse:
+        return await colab_get_system_metrics(runtime_id=runtime_id)
+
 
 __all__ = [
     "colab_connect_runtime",
     "colab_disconnect_runtime",
     "colab_get_runtime_status",
+    "colab_get_system_metrics",
     "colab_list_runtime_types",
     "colab_list_sessions",
     "connect_runtime_impl",
     "disconnect_runtime_impl",
     "get_runtime_status_impl",
+    "get_system_metrics_impl",
     "list_runtime_types_impl",
     "list_sessions_impl",
     "register_runtime_tools",

@@ -10,12 +10,13 @@ import inspect
 import json
 import time
 import uuid
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterable, List, Optional
 
 import httpx
 import websockets
 from mcp.types import ImageContent, TextContent
 
+from colab_mcp.kernel.colab_shims import build_colab_bootstrap_code
 from colab_mcp.kernel.correlator import KernelMessageCorrelator
 from colab_mcp.kernel.mime_converter import (
     MCPContentBlock,
@@ -30,7 +31,10 @@ from colab_mcp.kernel.models import (
     KernelExecutionTimeoutError,
     KernelState,
     RawExecutionResult,
+    StdinInputRequiredError,
+    build_colab_reply,
     build_execute_request,
+    build_input_reply,
     build_interrupt_request,
 )
 from colab_mcp.runtime.models import KernelConnectionParams
@@ -221,6 +225,7 @@ class KernelWebSocketClient:
         self._connect_lock: asyncio.Lock = asyncio.Lock()
         self._send_lock: asyncio.Lock = asyncio.Lock()
         self._reconnect_lock: asyncio.Lock = asyncio.Lock()
+        self._bootstrapped_signature: Optional[tuple[Any, ...]] = None
 
     @classmethod
     def from_connection_params(
@@ -335,6 +340,7 @@ class KernelWebSocketClient:
             )
             self._kernel_state = KernelState.IDLE.value
             self._idle_event.set()
+            self._bootstrapped_signature = None
             await self._cancel_reader_task()
             self._reader_task = asyncio.create_task(self._reader_loop())
             self._sync_session_state(
@@ -399,6 +405,7 @@ class KernelWebSocketClient:
         )
         self._kernel_state = KernelState.DISCONNECTED.value
         self._idle_event.clear()
+        self._bootstrapped_signature = None
         self._sync_session_state(kernel_state=self._kernel_state)
 
     def _schedule_reconnect(self) -> None:
@@ -528,6 +535,50 @@ class KernelWebSocketClient:
         except Exception:
             pass
 
+    async def bootstrap_colab_environment(
+        self,
+        *,
+        secrets: Optional[Dict[str, str]] = None,
+        env_overrides: Optional[Dict[str, str]] = None,
+        removed_secrets: Optional[Iterable[str]] = None,
+        access_token: Optional[str] = None,
+        force: bool = False,
+    ) -> None:
+        """Silently inject stored secrets, env overrides, and headless ``google.colab`` shims."""
+        clean_secrets = dict(secrets or {})
+        clean_env = dict(env_overrides or {})
+        clean_removed = tuple(sorted(set(removed_secrets or ())))
+        sig = (
+            self.kernel_id,
+            tuple(sorted(clean_secrets.items())),
+            tuple(sorted(clean_env.items())),
+            clean_removed,
+            access_token,
+        )
+        if not force and not clean_removed and self._bootstrapped_signature == sig:
+            return
+        bootstrap_code = build_colab_bootstrap_code(
+            secrets=clean_secrets,
+            env_overrides=clean_env,
+            removed_secrets=clean_removed,
+            access_token=access_token,
+        )
+        await self.execute_raw(
+            code=bootstrap_code,
+            timeout_seconds=15,
+            store_history=False,
+            stop_on_error=False,
+            silent=True,
+            allow_stdin=False,
+        )
+        self._bootstrapped_signature = (
+            self.kernel_id,
+            tuple(sorted(clean_secrets.items())),
+            tuple(sorted(clean_env.items())),
+            (),
+            access_token,
+        )
+
     async def execute_raw(
         self,
         code: str,
@@ -535,14 +586,19 @@ class KernelWebSocketClient:
         store_history: bool = True,
         stop_on_error: bool = True,
         silent: bool = False,
+        allow_stdin: bool = True,
+        stdin_inputs: Optional[List[str]] = None,
+        on_input_request: Optional[Callable[[str, bool, Dict[str, Any]], Awaitable[Optional[str]]]] = None,
         on_message: Optional[Callable[[Dict[str, Any]], Any]] = None,
         execution_id: Optional[str] = None,
     ) -> RawExecutionResult:
         """
         Execute ``code`` over Jupyter WebSocket and capture raw ``iopub``/``shell`` frames.
 
-        Terminates only when BOTH ``execute_reply`` (shell) AND ``status: idle`` (iopub)
-        have been observed, regardless of arrival order.
+        Supports interactive ``stdin`` (``input_request``/``input_reply``) via pre-supplied
+        ``stdin_inputs`` or an async ``on_input_request`` callback, as well as fallback
+        ``colab_request`` handling. Terminates when BOTH ``execute_reply`` (shell) and
+        ``status: idle`` (iopub) have been observed.
         """
         self._record_activity()
         if not self.is_connected:
@@ -553,12 +609,13 @@ class KernelWebSocketClient:
             session_id=self.session_id,
             silent=silent,
             store_history=store_history,
-            allow_stdin=False,
+            allow_stdin=allow_stdin,
             stop_on_error=stop_on_error,
         )
         msg_id = str(frame["header"]["msg_id"])
         queue = self.correlator.register_execution(msg_id)
         start_mono = time.monotonic()
+        pending_inputs = list(stdin_inputs) if stdin_inputs else []
 
         iopub_messages: List[Dict[str, Any]] = []
         reply_message: Optional[Dict[str, Any]] = None
@@ -599,9 +656,83 @@ class KernelWebSocketClient:
                 header = msg.get("header") if isinstance(msg.get("header"), dict) else {}
                 msg_type = header.get("msg_type") or msg.get("msg_type")
                 content = msg.get("content") if isinstance(msg.get("content"), dict) else {}
+                metadata = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
 
-                if msg_type in ("stream", "display_data", "execute_result", "execute_reply"):
+                if msg_type in ("stream", "display_data", "execute_result", "execute_reply", "input_request", "colab_request"):
                     self._record_activity()
+
+                if msg_type == "input_request":
+                    prompt = str(content.get("prompt", ""))
+                    password = bool(content.get("password", False))
+                    if pending_inputs:
+                        next_val = str(pending_inputs.pop(0))
+                        await self._send_frame(
+                            build_input_reply(
+                                value=next_val,
+                                parent_header=header,
+                                session_id=self.session_id,
+                            )
+                        )
+                    elif on_input_request is not None:
+                        wait_budget = max(1.0, deadline - loop.time())
+                        user_val = await asyncio.wait_for(
+                            on_input_request(prompt, password, header),
+                            timeout=wait_budget,
+                        )
+                        if user_val is None:
+                            await self._dispatch_timeout_sigint()
+                            raise StdinInputRequiredError(
+                                f"Interactive input cancelled while waiting for prompt {prompt!r}."
+                            )
+                        await self._send_frame(
+                            build_input_reply(
+                                value=str(user_val),
+                                parent_header=header,
+                                session_id=self.session_id,
+                            )
+                        )
+                        deadline = max(deadline, loop.time() + float(timeout_seconds))
+                    else:
+                        await self._dispatch_timeout_sigint()
+                        raise StdinInputRequiredError(
+                            f"Execution requested interactive input ({prompt!r}) while running synchronously "
+                            "without stdin_inputs. Provide stdin_inputs=[...] or run with "
+                            "wait_for_completion=False and answer via colab_send_input."
+                        )
+                    continue
+
+                if msg_type == "colab_request":
+                    req_type = str(content.get("request_type") or metadata.get("colab_request_type") or "")
+                    colab_msg_id = content.get("colab_msg_id")
+                    if "secret" in req_type.lower() and isinstance(content.get("key"), str):
+                        from colab_mcp.auth.secrets import get_secret
+
+                        secret_val = get_secret(content["key"])
+                        if secret_val is not None:
+                            reply_frame = build_colab_reply(
+                                value={"exists": True, "payload": secret_val},
+                                parent_header=header,
+                                colab_msg_id=colab_msg_id,
+                                session_id=self.session_id,
+                            )
+                        else:
+                            reply_frame = build_colab_reply(
+                                value={"exists": False},
+                                parent_header=header,
+                                colab_msg_id=colab_msg_id,
+                                session_id=self.session_id,
+                                error=f"Secret {content['key']!r} not found in colab-mcp secret vault.",
+                            )
+                    else:
+                        reply_frame = build_colab_reply(
+                            value=None,
+                            parent_header=header,
+                            colab_msg_id=colab_msg_id,
+                            session_id=self.session_id,
+                            error=f"Headless MCP runtime cannot show interactive Colab UI modal for request type {req_type!r}.",
+                        )
+                    await self._send_frame(reply_frame)
+                    continue
 
                 if msg_type == "status":
                     if content.get("execution_state") == KernelState.IDLE.value:
@@ -673,6 +804,8 @@ class KernelWebSocketClient:
         max_images: int = 5,
         include_images: bool = True,
         stop_on_error: bool = True,
+        allow_stdin: bool = True,
+        stdin_inputs: Optional[List[str]] = None,
     ) -> List[MCPContentBlock]:
         """Execute ``code`` and return chronological MCP ``[TextContent | ImageContent]`` blocks."""
         result = await self.execute_raw(
@@ -680,6 +813,8 @@ class KernelWebSocketClient:
             timeout_seconds=timeout_seconds,
             store_history=store_history,
             stop_on_error=stop_on_error,
+            allow_stdin=allow_stdin,
+            stdin_inputs=stdin_inputs,
         )
         blocks = convert_iopub_to_mcp_blocks(
             result.iopub_messages,
@@ -938,6 +1073,7 @@ class KernelWebSocketClient:
             pass
 
         had_ws = self._ws is not None
+        self._bootstrapped_signature = None
         self.correlator.flush_all(
             terminal_message={"_internal_type": "connection_lost", "reason": "kernel_restarted"}
         )

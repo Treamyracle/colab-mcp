@@ -46,8 +46,11 @@ from colab_mcp.kernel.tools import (
     colab_get_cell_output as _kernel_colab_get_cell_output,
     colab_get_execution_status as _kernel_colab_get_execution_status,
     colab_interrupt_execution as _kernel_colab_interrupt_execution,
+    ensure_kernel_bootstrapped,
     get_active_kernel_client,
     get_execution_registry,
+    resolve_stdin_inputs,
+    validate_env_overrides,
 )
 from colab_mcp.notebook.loader import load_and_validate_notebook, validate_workspace_path
 from colab_mcp.utils.logging import get_logger
@@ -581,6 +584,8 @@ class NotebookRunner:
         timeout_per_cell_seconds: int = 300,
         output_save_path: Optional[str] = None,
         workspace_root: Optional[Path] = None,
+        stdin_inputs: Optional[List[str]] = None,
+        env: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         if nb is None or not hasattr(nb, "cells"):
             raise ValueError("nb must be a valid nbformat.NotebookNode.")
@@ -588,6 +593,9 @@ class NotebookRunner:
         _validate_bool_param(reset_kernel_before_run, "reset_kernel_before_run")
         _validate_bool_param(stop_on_error, "stop_on_error")
         _validate_timeout_seconds(timeout_per_cell_seconds)
+        resolved_inputs = resolve_stdin_inputs(stdin_inputs)
+        clean_env = validate_env_overrides(env)
+        remaining_inputs = list(resolved_inputs) if resolved_inputs is not None else None
 
         total_cells = len(nb.cells)
         parsed_indices = _validate_cell_indices_types(cell_indices)
@@ -652,6 +660,18 @@ class NotebookRunner:
                     raise redacted_exc from None
                 kernel_reset_performed = True
 
+        try:
+            await ensure_kernel_bootstrapped(
+                client,
+                env=clean_env,
+                force=kernel_reset_performed,
+            )
+        except Exception as exc:
+            redacted_exc = _redact_exception(exc)
+            if redacted_exc is exc:
+                raise
+            raise redacted_exc from None
+
         summary_by_index: Dict[int, Dict[str, Any]] = {
             i: {
                 "cell_index": i,
@@ -686,10 +706,25 @@ class NotebookRunner:
 
             if use_execute_raw:
                 try:
+                    raw_kwargs: Dict[str, Any] = {
+                        "timeout_seconds": timeout_per_cell_seconds,
+                        "stop_on_error": stop_on_error,
+                    }
+                    if isinstance(client, KernelWebSocketClient) and remaining_inputs is not None:
+                        async def _nb_stdin_handler(
+                            _prompt: str,
+                            _password: bool,
+                            _hdr: Dict[str, Any],
+                        ) -> Optional[str]:
+                            if remaining_inputs:
+                                return remaining_inputs.pop(0)
+                            return None
+
+                        raw_kwargs["on_input_request"] = _nb_stdin_handler
+
                     raw = await client.execute_raw(
                         source,
-                        timeout_seconds=timeout_per_cell_seconds,
-                        stop_on_error=stop_on_error,
+                        **raw_kwargs,
                     )
                     (
                         cell_outputs,
@@ -916,6 +951,8 @@ async def execute_notebook_impl(
     timeout_per_cell_seconds: int = 300,
     output_save_path: Optional[str] = None,
     runtime_id: Optional[str] = None,
+    stdin_inputs: Optional[List[str]] = None,
+    env: Optional[Dict[str, str]] = None,
     *,
     _client_getter: Optional[Callable[[Optional[str]], Awaitable[Any]]] = None,
 ) -> NotebookExecutionResponse:
@@ -929,6 +966,8 @@ async def execute_notebook_impl(
         _validate_bool_param(reset_kernel_before_run, "reset_kernel_before_run")
         _validate_bool_param(stop_on_error, "stop_on_error")
         _validate_timeout_seconds(timeout_per_cell_seconds)
+        resolved_inputs = resolve_stdin_inputs(stdin_inputs)
+        clean_env = validate_env_overrides(env)
         if runtime_id is not None and not isinstance(runtime_id, str):
             raise ValueError("runtime_id must be a string or None.")
         parsed_indices = _validate_cell_indices_types(cell_indices)
@@ -961,6 +1000,8 @@ async def execute_notebook_impl(
             timeout_per_cell_seconds=timeout_per_cell_seconds,
             output_save_path=output_save_path,
             workspace_root=workspace_root,
+            stdin_inputs=resolved_inputs,
+            env=clean_env,
         )
         return NotebookExecutionResponse(**redact_data(summary))
     except Exception as exc:
@@ -979,6 +1020,8 @@ async def colab_execute_notebook(
     timeout_per_cell_seconds: int = 300,
     output_save_path: Optional[str] = None,
     runtime_id: Optional[str] = None,
+    stdin_inputs: Optional[List[str]] = None,
+    env: Optional[Dict[str, str]] = None,
     *,
     _client_getter: Optional[Callable[[Optional[str]], Awaitable[Any]]] = None,
 ) -> NotebookExecutionResponse:
@@ -992,6 +1035,8 @@ async def colab_execute_notebook(
         timeout_per_cell_seconds=timeout_per_cell_seconds,
         output_save_path=output_save_path,
         runtime_id=runtime_id,
+        stdin_inputs=stdin_inputs,
+        env=env,
         _client_getter=_client_getter,
     )
 
@@ -1019,8 +1064,8 @@ def register_notebook_tools(mcp: MCPServer) -> None:
         description=(
             "Load, validate, and execute an .ipynb notebook (nbformat v4) cell-by-cell on "
             "the connected Colab kernel. Supports selective 0-based cell_indices execution, "
-            "optional pre-run kernel restart, stop_on_error fault policies, and atomic disk "
-            "serialization of executed outputs to output_save_path."
+            "optional pre-run kernel restart, stop_on_error fault policies, atomic disk "
+            "serialization to output_save_path, and optional stdin_inputs / env overrides."
         ),
     )
     async def _tool_colab_execute_notebook(
@@ -1033,6 +1078,8 @@ def register_notebook_tools(mcp: MCPServer) -> None:
         stop_on_error: StrictBool = True,
         timeout_per_cell_seconds: Annotated[StrictInt, Field(ge=5, le=14400)] = 300,
         output_save_path: Optional[str] = None,
+        stdin_inputs: Optional[List[str]] = None,
+        env: Optional[Dict[str, str]] = None,
     ) -> NotebookExecutionResponse:
         return await execute_notebook_impl(
             notebook_path=notebook_path,
@@ -1042,6 +1089,8 @@ def register_notebook_tools(mcp: MCPServer) -> None:
             stop_on_error=stop_on_error,
             timeout_per_cell_seconds=timeout_per_cell_seconds,
             output_save_path=output_save_path,
+            stdin_inputs=stdin_inputs,
+            env=env,
         )
 
 

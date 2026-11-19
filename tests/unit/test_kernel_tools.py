@@ -403,6 +403,7 @@ async def test_fastmcp_tool_registration_schemas(kernel_mcp_server: MCPServer):
         "colab_get_execution_status",
         "colab_get_cell_output",
         "colab_interrupt_execution",
+        "colab_send_input",
     }
     assert by_name["colab_execute_code"].input_schema["properties"]["wait_for_completion"]["type"] == "boolean"
     assert by_name["colab_get_cell_output"].input_schema["properties"]["include_images"]["type"] == "boolean"

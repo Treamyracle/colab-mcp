@@ -21,6 +21,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, ImageContent, TextContent
 from pydantic import BaseModel, StrictBool
 
+from colab_mcp.auth.secrets import get_all_secrets, resolve_secret_interpolation
 from colab_mcp.kernel.client import KernelWebSocketClient
 from colab_mcp.kernel.mime_converter import (
     MCPContentBlock,
@@ -30,10 +31,13 @@ from colab_mcp.kernel.mime_converter import (
 )
 from colab_mcp.kernel.models import (
     ExecutionLifecycleStatus,
+    ExecutionNotFoundError,
     ExecutionStatusResponse,
     InterruptExecutionResponse,
     KernelConnectionError,
     KernelExecutionTimeoutError,
+    SendInputResponse,
+    StdinInputRequiredError,
 )
 from colab_mcp.runtime.session_manager import get_session_manager
 from colab_mcp.utils.logging import get_logger
@@ -141,10 +145,44 @@ class ExecutionRegistry(dict):
             "error_value": None,
             "error_message": None,
             "execution_count": None,
+            "pending_input_prompt": None,
+            "pending_input_password": None,
+            "input_queue": asyncio.Queue(),
             "task": None,
         }
         self[execution_id] = record
         return record
+
+    def set_waiting_for_input(
+        self,
+        execution_id: str,
+        prompt: str = "",
+        password: bool = False,
+    ) -> None:
+        record = self.get(execution_id)
+        if not isinstance(record, dict):
+            return
+        record["status"] = ExecutionLifecycleStatus.WAITING_FOR_INPUT.value
+        record["pending_input_prompt"] = redact_credentials(prompt)
+        record["pending_input_password"] = bool(password)
+
+    def provide_input(self, execution_id: str, value: str) -> None:
+        record = self.get(execution_id)
+        if not isinstance(record, dict):
+            raise ExecutionNotFoundError(
+                f"No execution found for execution_id '{execution_id}'."
+            )
+        if record.get("status") != ExecutionLifecycleStatus.WAITING_FOR_INPUT.value:
+            raise ValueError(
+                f"Execution '{execution_id}' is not waiting for input (status={record.get('status')!r})."
+            )
+        q = record.get("input_queue")
+        if q is None:
+            raise ValueError(f"Execution '{execution_id}' does not have an active input queue.")
+        record["status"] = ExecutionLifecycleStatus.RUNNING.value
+        record["pending_input_prompt"] = None
+        record["pending_input_password"] = None
+        q.put_nowait(value)
 
     def record_iopub_message(self, execution_id: str, msg: Dict[str, Any]) -> None:
         record = self.get(execution_id)
@@ -260,6 +298,70 @@ def _validate_nonempty_str(value: Any, name: str) -> str:
     return value
 
 
+def resolve_stdin_inputs(stdin_inputs: Optional[List[str]]) -> Optional[List[str]]:
+    """Validate and resolve optional ``$SECRET:<NAME>`` entries in ``stdin_inputs``."""
+    if stdin_inputs is None:
+        return None
+    if not isinstance(stdin_inputs, list):
+        raise ValueError("stdin_inputs must be a list of strings or None")
+    resolved: List[str] = []
+    for idx, item in enumerate(stdin_inputs):
+        if not isinstance(item, str):
+            raise ValueError(f"stdin_inputs[{idx}] must be a string")
+        resolved.append(resolve_secret_interpolation(item))
+    return resolved
+
+
+def validate_env_overrides(env: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:
+    """Validate optional environment variable overrides."""
+    if env is None:
+        return None
+    if not isinstance(env, dict):
+        raise ValueError("env must be a dict mapping string keys to string values or None")
+    clean: Dict[str, str] = {}
+    for k, v in env.items():
+        if not isinstance(k, str) or not k:
+            raise ValueError("env keys must be non-empty strings")
+        if not isinstance(v, str):
+            raise ValueError(f"env[{k!r}] must be a string")
+        clean[k] = v
+    return clean
+
+
+async def ensure_kernel_bootstrapped(
+    client: Any,
+    *,
+    env: Optional[Dict[str, str]] = None,
+    force: bool = False,
+) -> None:
+    """Inject stored secrets, env overrides, and headless ``google.colab`` shims."""
+    if not isinstance(client, KernelWebSocketClient):
+        return
+    try:
+        secrets = get_all_secrets()
+    except Exception as exc:
+        logger.debug("Skipping secret vault load during bootstrap: %s", exc)
+        secrets = {}
+
+    access_token: Optional[str] = None
+    try:
+        from colab_mcp.auth.oauth import get_valid_auth_headers
+
+        hdrs = await get_valid_auth_headers(0)
+        auth_val = str(hdrs.get("Authorization") or "")
+        if auth_val.startswith("Bearer "):
+            access_token = auth_val[len("Bearer "):].strip() or None
+    except Exception:
+        access_token = None
+
+    await client.bootstrap_colab_environment(
+        secrets=secrets,
+        env_overrides=env,
+        access_token=access_token,
+        force=force,
+    )
+
+
 def _redact_blocks(blocks: List[MCPContentBlock]) -> List[MCPContentBlock]:
     redacted: List[MCPContentBlock] = []
     for block in blocks:
@@ -316,16 +418,38 @@ async def _run_async_execution_task(
     max_text_lines: int,
     max_output_bytes: int,
     max_images: int,
+    stdin_inputs: Optional[List[str]] = None,
 ) -> None:
+    async def _handle_async_input_request(prompt: str, password: bool, _header: Dict[str, Any]) -> Optional[str]:
+        if isinstance(registry, ExecutionRegistry):
+            registry.set_waiting_for_input(execution_id, prompt=prompt, password=password)
+        else:
+            rec = registry.get(execution_id) if isinstance(registry, Mapping) else None
+            if isinstance(rec, dict):
+                rec["status"] = ExecutionLifecycleStatus.WAITING_FOR_INPUT.value
+                rec["pending_input_prompt"] = redact_credentials(prompt)
+                rec["pending_input_password"] = bool(password)
+        rec = registry.get(execution_id) if isinstance(registry, Mapping) else None
+        q = rec.get("input_queue") if isinstance(rec, dict) else None
+        if q is None:
+            return None
+        return await q.get()
+
     try:
         if isinstance(client, KernelWebSocketClient) or _is_configured_mock_method(client, "execute_raw"):
-            raw = await client.execute_raw(
-                code=code,
-                timeout_seconds=timeout_seconds,
-                store_history=store_history,
-                on_message=lambda msg: registry.record_iopub_message(execution_id, msg),
-                execution_id=execution_id,
-            )
+            exec_kwargs: Dict[str, Any] = {
+                "code": code,
+                "timeout_seconds": timeout_seconds,
+                "store_history": store_history,
+                "on_message": lambda msg: registry.record_iopub_message(execution_id, msg),
+                "execution_id": execution_id,
+            }
+            if isinstance(client, KernelWebSocketClient):
+                exec_kwargs["stdin_inputs"] = stdin_inputs
+                exec_kwargs["on_input_request"] = _handle_async_input_request
+            elif stdin_inputs is not None:
+                exec_kwargs["stdin_inputs"] = stdin_inputs
+            raw = await client.execute_raw(**exec_kwargs)
             blocks = convert_iopub_to_mcp_blocks(
                 raw.iopub_messages,
                 include_images=True,
@@ -406,6 +530,8 @@ async def execute_code_impl(
     max_text_lines: int = 1000,
     max_output_bytes: int = 102400,
     max_images: int = 5,
+    stdin_inputs: Optional[List[str]] = None,
+    env: Optional[Dict[str, str]] = None,
     *,
     _client_getter: Optional[Callable[[Optional[str]], Awaitable[Any]]] = None,
     _registry_getter: Optional[Callable[[], Any]] = None,
@@ -422,6 +548,8 @@ async def execute_code_impl(
     _validate_int_range(max_text_lines, "max_text_lines", 10, 10000)
     _validate_int_range(max_output_bytes, "max_output_bytes", 1024, 10485760)
     _validate_int_range(max_images, "max_images", 1, 50)
+    resolved_inputs = resolve_stdin_inputs(stdin_inputs)
+    clean_env = validate_env_overrides(env)
 
     client_getter = _client_getter or get_active_kernel_client
     registry_getter = _registry_getter or get_execution_registry
@@ -429,6 +557,7 @@ async def execute_code_impl(
     client = await client_getter(runtime_id)
     effective_runtime = getattr(client, "runtime_id", None) or getattr(client, "endpoint", None) or runtime_id
     _record_session_activity(effective_runtime)
+    await ensure_kernel_bootstrapped(client, env=clean_env)
 
     if not wait_for_completion:
         registry = registry_getter()
@@ -447,6 +576,9 @@ async def execute_code_impl(
                 "blocks": None,
                 "stdout_chunks": [],
                 "has_error": False,
+                "pending_input_prompt": None,
+                "pending_input_password": None,
+                "input_queue": asyncio.Queue(),
                 "task": None,
             }
             registry[execution_id] = record
@@ -462,6 +594,7 @@ async def execute_code_impl(
                 max_text_lines=max_text_lines,
                 max_output_bytes=max_output_bytes,
                 max_images=max_images,
+                stdin_inputs=resolved_inputs,
             )
         )
         record["task"] = task
@@ -480,11 +613,14 @@ async def execute_code_impl(
     # Synchronous execution
     try:
         if isinstance(client, KernelWebSocketClient) or _is_configured_mock_method(client, "execute_raw"):
-            raw = await client.execute_raw(
-                code=code,
-                timeout_seconds=timeout_seconds,
-                store_history=store_history,
-            )
+            sync_kwargs: Dict[str, Any] = {
+                "code": code,
+                "timeout_seconds": timeout_seconds,
+                "store_history": store_history,
+            }
+            if isinstance(client, KernelWebSocketClient) or resolved_inputs is not None:
+                sync_kwargs["stdin_inputs"] = resolved_inputs
+            raw = await client.execute_raw(**sync_kwargs)
             blocks = convert_iopub_to_mcp_blocks(
                 raw.iopub_messages,
                 include_images=True,
@@ -509,6 +645,9 @@ async def execute_code_impl(
         )
         return (_redact_blocks(list(blocks or [])), False)
 
+    except StdinInputRequiredError as exc:
+        err_msg = redact_credentials(str(exc))
+        return ([TextContent(type="text", text=f"StdinInputRequiredError: {err_msg}")], True)
     except KernelExecutionTimeoutError as exc:
         err_msg = redact_credentials(str(exc))
         return ([TextContent(type="text", text=f"KernelExecutionTimeoutError: {err_msg}")], True)
@@ -525,6 +664,8 @@ async def colab_execute_code(
     max_text_lines: int = 1000,
     max_output_bytes: int = 102400,
     max_images: int = 5,
+    stdin_inputs: Optional[List[str]] = None,
+    env: Optional[Dict[str, str]] = None,
     *,
     _client_getter: Optional[Callable[[Optional[str]], Awaitable[Any]]] = None,
     _registry_getter: Optional[Callable[[], Any]] = None,
@@ -539,6 +680,8 @@ async def colab_execute_code(
         max_text_lines=max_text_lines,
         max_output_bytes=max_output_bytes,
         max_images=max_images,
+        stdin_inputs=stdin_inputs,
+        env=env,
         _client_getter=_client_getter,
         _registry_getter=_registry_getter,
     )
@@ -602,6 +745,8 @@ async def get_execution_status_impl(
         "execution_count": record.get("execution_count"),
         "error_name": record.get("error_name"),
         "error_value": record.get("error_value"),
+        "pending_input_prompt": record.get("pending_input_prompt"),
+        "pending_input_password": record.get("pending_input_password"),
     }
     return redact_data(result)
 
@@ -837,6 +982,66 @@ async def colab_interrupt_execution(
     )
 
 
+async def send_input_impl(
+    execution_id: str,
+    value: str,
+    *,
+    _registry_getter: Optional[Callable[[], Any]] = None,
+) -> SendInputResponse:
+    """Deliver interactive stdin reply (supporting ``$SECRET:<NAME>``) to a waiting execution."""
+    _validate_nonempty_str(execution_id, "execution_id")
+    if not isinstance(value, str):
+        raise ValueError("value must be a string")
+    resolved_value = resolve_secret_interpolation(value)
+
+    registry_getter = _registry_getter or get_execution_registry
+    registry = registry_getter()
+
+    if isinstance(registry, ExecutionRegistry):
+        registry.provide_input(execution_id, resolved_value)
+    else:
+        record = registry.get(execution_id) if isinstance(registry, Mapping) else None
+        if not isinstance(record, dict):
+            raise ExecutionNotFoundError(
+                f"No execution found for execution_id '{execution_id}'."
+            )
+        if record.get("status") != ExecutionLifecycleStatus.WAITING_FOR_INPUT.value:
+            raise ValueError(
+                f"Execution '{execution_id}' is not waiting for input (status={record.get('status')!r})."
+            )
+        q = record.get("input_queue")
+        if q is None:
+            raise ValueError(f"Execution '{execution_id}' does not have an active input queue.")
+        record["status"] = ExecutionLifecycleStatus.RUNNING.value
+        record["pending_input_prompt"] = None
+        record["pending_input_password"] = None
+        q.put_nowait(resolved_value)
+
+    record_after = registry.get(execution_id) if isinstance(registry, Mapping) else None
+    runtime_id = record_after.get("runtime_id") if isinstance(record_after, Mapping) else None
+    _record_session_activity(runtime_id)
+
+    return SendInputResponse(
+        execution_id=execution_id,
+        status="input_delivered",
+        message=f"Interactive stdin reply delivered to execution '{execution_id}'.",
+    )
+
+
+async def colab_send_input(
+    execution_id: str,
+    value: str,
+    *,
+    _registry_getter: Optional[Callable[[], Any]] = None,
+) -> SendInputResponse:
+    """Send an interactive stdin reply to an async execution in ``waiting_for_input`` state."""
+    return await send_input_impl(
+        execution_id=execution_id,
+        value=value,
+        _registry_getter=_registry_getter,
+    )
+
+
 # ============================================================================
 # FastMCP Tool Registration (TECH_SPEC Â§7.3.3)
 # ============================================================================
@@ -851,7 +1056,8 @@ def register_kernel_tools(mcp: MCPServer) -> None:
             "Execute a Python snippet or IPython magic command (!pip, %timeit) on the "
             "connected Colab kernel. Returns captured stdout, stderr, rich multimodal MIME "
             "outputs (e.g. Matplotlib charts as ImageContent), and sanitized error tracebacks "
-            "in strict chronological order with automatic head-tail truncation."
+            "in strict chronological order with automatic head-tail truncation. Supports "
+            "optional stdin_inputs (with '$SECRET:<NAME>' interpolation) and env overrides."
         ),
         structured_output=False,
     )
@@ -864,6 +1070,8 @@ def register_kernel_tools(mcp: MCPServer) -> None:
         max_text_lines: int = 1000,
         max_output_bytes: int = 102400,
         max_images: int = 5,
+        stdin_inputs: Optional[List[str]] = None,
+        env: Optional[Dict[str, str]] = None,
     ) -> Any:
         payload, has_error = await execute_code_impl(
             code=code,
@@ -874,6 +1082,8 @@ def register_kernel_tools(mcp: MCPServer) -> None:
             max_text_lines=max_text_lines,
             max_output_bytes=max_output_bytes,
             max_images=max_images,
+            stdin_inputs=stdin_inputs,
+            env=env,
         )
         if has_error and isinstance(payload, list):
             return CallToolResult(content=payload, is_error=True)  # type: ignore[arg-type]
@@ -951,6 +1161,23 @@ def register_kernel_tools(mcp: MCPServer) -> None:
         data = await colab_interrupt_execution(runtime_id=runtime_id)
         return InterruptExecutionResponse(**data)
 
+    @mcp.tool(
+        name="colab_send_input",
+        description=(
+            "Deliver a stdin reply to an asynchronous execution waiting on input() or getpass() "
+            "(status='waiting_for_input'). Supports '$SECRET:<NAME>' placeholders to inject "
+            "stored vault secrets without exposing plaintext tokens."
+        ),
+    )
+    async def _tool_colab_send_input(
+        execution_id: str,
+        value: str,
+    ) -> SendInputResponse:
+        return await colab_send_input(
+            execution_id=execution_id,
+            value=value,
+        )
+
 
 __all__ = [
     "ExecutionRegistry",
@@ -959,6 +1186,8 @@ __all__ = [
     "colab_get_cell_output",
     "colab_get_execution_status",
     "colab_interrupt_execution",
+    "colab_send_input",
+    "ensure_kernel_bootstrapped",
     "execute_code_impl",
     "get_active_kernel_client",
     "get_cell_output_impl",
@@ -968,4 +1197,7 @@ __all__ = [
     "register_kernel_tools",
     "reset_execution_registry",
     "reset_kernel_clients",
+    "resolve_stdin_inputs",
+    "send_input_impl",
+    "validate_env_overrides",
 ]

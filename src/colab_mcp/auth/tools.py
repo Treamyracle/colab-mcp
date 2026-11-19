@@ -9,6 +9,14 @@ from typing import Any, Dict, Optional
 from mcp.server.mcpserver import MCPServer
 
 from colab_mcp.auth import cdp_browser, keystore, oauth
+from colab_mcp.auth.secrets import (
+    DeleteSecretResponse,
+    ListSecretsResponse,
+    SetSecretResponse,
+    delete_secret,
+    list_secrets,
+    set_secret,
+)
 from colab_mcp.auth.models import (
     AuthenticationRequiredError,
     AuthMethod,
@@ -277,6 +285,96 @@ async def colab_logout_impl(
     )
 
 
+async def _sync_secret_with_active_kernel(
+    *,
+    name: str,
+    value: Optional[str] = None,
+    removed: bool = False,
+    runtime_id: Optional[str] = None,
+) -> bool:
+    """Best-effort injection or removal of a secret on any currently connected kernel."""
+    try:
+        from colab_mcp.kernel.client import KernelWebSocketClient
+        from colab_mcp.kernel.tools import _KERNEL_CLIENTS
+        from colab_mcp.runtime.session_manager import get_session_manager
+
+        mgr = get_session_manager()
+        target_id = runtime_id
+        if target_id is None:
+            session = mgr.get_session(None)
+            target_id = session.endpoint if session is not None else None
+        if target_id is None:
+            return False
+        client = _KERNEL_CLIENTS.get(target_id)
+        if isinstance(client, KernelWebSocketClient) and client.is_connected:
+            await client.bootstrap_colab_environment(
+                secrets={name: value} if (not removed and value is not None) else None,
+                removed_secrets=[name] if removed else None,
+                force=True,
+            )
+            return True
+    except Exception as exc:
+        logger.debug("Skipping active kernel secret sync for %s: %s", name, exc)
+    return False
+
+
+async def colab_set_secret_impl(
+    name: str,
+    value: str,
+    runtime_id: Optional[str] = None,
+) -> SetSecretResponse:
+    """Encrypt and store a named secret/token and push it to any connected kernel."""
+    meta = set_secret(name=name, value=value)
+    injected = await _sync_secret_with_active_kernel(
+        name=meta.name,
+        value=value,
+        removed=False,
+        runtime_id=runtime_id,
+    )
+    return SetSecretResponse(
+        status="stored",
+        name=meta.name,
+        masked_preview=meta.masked_preview,
+        length=meta.length,
+        injected_into_active_kernel=injected,
+        message=(
+            f"Secret '{meta.name}' encrypted and stored"
+            + (" (and injected into active Colab kernel)." if injected else ". Will auto-inject on kernel execution.")
+        ),
+    )
+
+
+async def colab_list_secrets_impl() -> ListSecretsResponse:
+    """List metadata and masked previews for stored secrets."""
+    items = list_secrets()
+    return ListSecretsResponse(count=len(items), secrets=items)
+
+
+async def colab_delete_secret_impl(
+    name: str,
+    runtime_id: Optional[str] = None,
+) -> DeleteSecretResponse:
+    """Delete a stored secret and unset it on any connected kernel."""
+    existed = delete_secret(name=name)
+    clean_name = name.strip() if isinstance(name, str) else str(name)
+    removed = await _sync_secret_with_active_kernel(
+        name=clean_name,
+        removed=True,
+        runtime_id=runtime_id,
+    )
+    return DeleteSecretResponse(
+        status="deleted",
+        name=clean_name,
+        existed=existed,
+        removed_from_active_kernel=removed,
+        message=(
+            f"Secret '{clean_name}' removed from encrypted vault."
+            if existed
+            else f"Secret '{clean_name}' was not present in vault."
+        ),
+    )
+
+
 def register_auth_tools(mcp: MCPServer) -> None:
     """Register all authentication tools on the MCPServer instance."""
 
@@ -333,4 +431,48 @@ def register_auth_tools(mcp: MCPServer) -> None:
         return await colab_logout_impl(
             auth_user_index=auth_user_index,
             terminate_active_runtimes=terminate_active_runtimes,
+        )
+
+    @mcp.tool(
+        name="colab_set_secret",
+        description=(
+            "Encrypt and store an API token or secret (e.g. HF_TOKEN, WANDB_API_KEY, OPENAI_API_KEY) "
+            "in the OS keyring vault. Stored secrets are automatically redacted on egress and injected into "
+            "os.environ and google.colab.userdata.get() on Colab kernels without browser popups."
+        ),
+    )
+    async def colab_set_secret(
+        name: str,
+        value: str,
+        runtime_id: Optional[str] = None,
+    ) -> SetSecretResponse:
+        return await colab_set_secret_impl(
+            name=name,
+            value=value,
+            runtime_id=runtime_id,
+        )
+
+    @mcp.tool(
+        name="colab_list_secrets",
+        description=(
+            "List names and masked previews of all API tokens/secrets stored in the colab-mcp vault "
+            "(never returns plaintext values)."
+        ),
+    )
+    async def colab_list_secrets() -> ListSecretsResponse:
+        return await colab_list_secrets_impl()
+
+    @mcp.tool(
+        name="colab_delete_secret",
+        description=(
+            "Delete a named secret/token from the colab-mcp encrypted vault and unset it from any active kernel."
+        ),
+    )
+    async def colab_delete_secret(
+        name: str,
+        runtime_id: Optional[str] = None,
+    ) -> DeleteSecretResponse:
+        return await colab_delete_secret_impl(
+            name=name,
+            runtime_id=runtime_id,
         )

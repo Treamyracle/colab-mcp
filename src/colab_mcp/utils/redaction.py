@@ -51,11 +51,31 @@ CREDENTIAL_REDACTION_PATTERN: re.Pattern = re.compile(
 
 REDACTED_SUBSTITUTION = "[REDACTED]"
 
+_MIN_DYNAMIC_SECRET_LEN = 6
+_DYNAMIC_SECRET_VALUES: set[str] = set()
+
+
+def register_dynamic_secret(value: str) -> None:
+    """Register a runtime secret value so it is redacted from all logs and tool egress."""
+    if isinstance(value, str) and len(value) >= _MIN_DYNAMIC_SECRET_LEN:
+        _DYNAMIC_SECRET_VALUES.add(value)
+
+
+def unregister_dynamic_secret(value: str) -> None:
+    """Remove a secret value from the in-memory dynamic redaction set."""
+    if isinstance(value, str):
+        _DYNAMIC_SECRET_VALUES.discard(value)
+
+
+def clear_dynamic_secrets() -> None:
+    """Clear all registered dynamic secrets (primarily for test isolation)."""
+    _DYNAMIC_SECRET_VALUES.clear()
+
 
 def redact_credentials(text: str) -> str:
     """
     Scans input text and replaces sensitive Google tokens, session cookies,
-    and authorization signatures with '[REDACTED]'.
+    registered user secrets, and authorization signatures with '[REDACTED]'.
     Preserves JSON / dict structures and non-sensitive properties.
     """
     if not isinstance(text, str):
@@ -66,7 +86,13 @@ def redact_credentials(text: str) -> str:
         text,
     )
     # Then redact standalone tokens, Bearer headers, SAPISIDHASH, and HTTP header cookies
-    return CREDENTIAL_REDACTION_PATTERN.sub(REDACTED_SUBSTITUTION, text)
+    text = CREDENTIAL_REDACTION_PATTERN.sub(REDACTED_SUBSTITUTION, text)
+    # Finally scrub any registered user secret values (longest first to avoid partial leaves)
+    if _DYNAMIC_SECRET_VALUES:
+        for secret_val in sorted(_DYNAMIC_SECRET_VALUES, key=len, reverse=True):
+            if secret_val in text:
+                text = text.replace(secret_val, REDACTED_SUBSTITUTION)
+    return text
 
 
 def redact_data(data: Any) -> Any:

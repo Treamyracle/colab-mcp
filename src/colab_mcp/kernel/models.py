@@ -51,6 +51,10 @@ class ExecutionNotFoundError(ColabKernelError, KeyError):
     """Raised when an execution_id is missing from the ExecutionRegistry."""
 
 
+class StdinInputRequiredError(ColabKernelError):
+    """Raised when synchronous execution hits an input()/getpass() prompt without stdin_inputs."""
+
+
 # ============================================================================
 # Jupyter Messaging Protocol v5.3/v5.4 Wire Models & Builders
 # ============================================================================
@@ -246,6 +250,33 @@ def build_input_reply(
     )
 
 
+def build_colab_reply(
+    value: Any,
+    parent_header: Dict[str, Any],
+    colab_msg_id: Any = None,
+    session_id: str = "",
+    error: Optional[str] = None,
+    username: str = "colab-mcp",
+    msg_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build a Google Colab ``colab_reply`` frame in response to a ``colab_request``."""
+    reply_content: Dict[str, Any] = {
+        "colab_msg_id": colab_msg_id,
+        "value": value,
+    }
+    if error is not None:
+        reply_content["error"] = error
+    return build_jupyter_message(
+        msg_type="colab_reply",
+        content=reply_content,
+        session_id=session_id,
+        channel="shell",
+        parent_header=parent_header,
+        username=username,
+        msg_id=msg_id,
+    )
+
+
 # ============================================================================
 # Execution Lifecycle & MCP Tool Response Models
 # ============================================================================
@@ -256,6 +287,7 @@ class ExecutionLifecycleStatus(str, Enum):
 
     QUEUED = "queued"
     RUNNING = "running"
+    WAITING_FOR_INPUT = "waiting_for_input"
     COMPLETED = "completed"
     FAILED = "failed"
     TIMED_OUT = "timed_out"
@@ -324,9 +356,19 @@ class ExecutionStatusResponse(_DictCompatMixin, BaseModel):
     execution_count: Optional[int] = None
     error_name: Optional[str] = None
     error_value: Optional[str] = None
+    pending_input_prompt: Optional[str] = None
+    pending_input_password: Optional[bool] = None
 
 
 ExecutionStatus = ExecutionStatusResponse
+
+
+class SendInputResponse(_DictCompatMixin, BaseModel):
+    """Response schema for ``colab_send_input``."""
+
+    execution_id: str
+    status: str = "input_delivered"
+    message: str = "Input reply delivered to waiting kernel execution."
 
 
 class AsyncExecutionResponse(_DictCompatMixin, BaseModel):
@@ -371,6 +413,8 @@ class ExecutionRecord(BaseModel):
     has_error: bool = False
     error_name: Optional[str] = None
     error_value: Optional[str] = None
+    pending_input_prompt: Optional[str] = None
+    pending_input_password: Optional[bool] = None
     traceback: Optional[List[str]] = None
     task: Optional[Any] = Field(default=None, exclude=True)
 
@@ -392,6 +436,8 @@ class ExecutionRecord(BaseModel):
             execution_count=self.execution_count,
             error_name=self.error_name,
             error_value=self.error_value,
+            pending_input_prompt=self.pending_input_prompt,
+            pending_input_password=self.pending_input_password,
         )
 
 
@@ -417,6 +463,9 @@ __all__ = [
     "KernelState",
     "KernelTimeoutError",
     "RawExecutionResult",
+    "SendInputResponse",
+    "StdinInputRequiredError",
+    "build_colab_reply",
     "build_execute_request",
     "build_input_reply",
     "build_interrupt_request",

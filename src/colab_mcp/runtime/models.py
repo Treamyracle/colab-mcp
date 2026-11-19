@@ -592,3 +592,30 @@ class DisconnectRuntimeResponse(BaseModel):
     terminated_runtime_ids: List[str] = Field(default_factory=list)
     terminated_count: int = 0
     message: str
+
+
+class GpuMetric(BaseModel):
+    """GPU utilization and VRAM snapshot from nvidia-smi."""
+
+    index: int = 0
+    name: str
+    gpu_utilization_percent: Optional[float] = None
+    vram_used_mb: Optional[float] = None
+    vram_total_mb: Optional[float] = None
+    temperature_celsius: Optional[float] = None
+
+
+class SystemMetricsResponse(BaseModel):
+    """Response schema for ``colab_get_system_metrics``."""
+
+    runtime_id: Optional[str] = None
+    gpus: List[GpuMetric] = Field(default_factory=list)
+    ram_total_mb: Optional[float] = None
+    ram_used_mb: Optional[float] = None
+    ram_free_mb: Optional[float] = None
+    ram_utilization_percent: Optional[float] = None
+    disk_path: str = "/content"
+    disk_total_gb: Optional[float] = None
+    disk_used_gb: Optional[float] = None
+    disk_free_gb: Optional[float] = None
+    disk_utilization_percent: Optional[float] = None

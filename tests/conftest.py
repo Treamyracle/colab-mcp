@@ -14,15 +14,18 @@ from mcp.server.mcpserver import MCPServer
 from colab_mcp.auth.models import AuthMethod, GoogleCredentials
 from colab_mcp.auth.tools import register_auth_tools
 from colab_mcp.utils.logging import unprotect_stdout
+from colab_mcp.utils.redaction import clear_dynamic_secrets
 
 
 @pytest.fixture(autouse=True)
 def cleanup_stdout():
-    """Ensure sys.stdout is cleanly restored and active flows reset after each test."""
+    """Ensure sys.stdout is cleanly restored and active flows/secrets reset after each test."""
     from colab_mcp.auth.oauth import _ACTIVE_REMOTE_FLOWS
     _ACTIVE_REMOTE_FLOWS.clear()
+    clear_dynamic_secrets()
     yield
     _ACTIVE_REMOTE_FLOWS.clear()
+    clear_dynamic_secrets()
     unprotect_stdout()
 
 

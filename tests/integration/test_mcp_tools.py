@@ -47,7 +47,12 @@ ALL_12_MCP_TOOLS = [
 
 ALL_EXPECTED_MCP_TOOLS = [
     *ALL_12_MCP_TOOLS,
+    "colab_set_secret",
+    "colab_list_secrets",
+    "colab_delete_secret",
     "colab_list_sessions",
+    "colab_get_system_metrics",
+    "colab_send_input",
     "colab_list_files",
     "colab_download_file",
     "colab_upload_file",

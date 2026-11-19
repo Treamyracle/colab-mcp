@@ -39,6 +39,7 @@ from colab_mcp.auth.oauth import _ACTIVE_REMOTE_FLOWS
 from colab_mcp.runtime.session_manager import get_session_manager, reset_session_manager
 from colab_mcp.server import create_server
 from colab_mcp.utils.logging import unprotect_stdout
+from colab_mcp.utils.redaction import clear_dynamic_secrets
 
 from .colab_twin import TWIN_EXTERNAL_HOSTS, ColabTwin
 from .helpers import require_cli_command
@@ -99,6 +100,7 @@ async def isolated_opaque_env(
 ) -> AsyncGenerator[Path, None]:
     """Fail-closed isolation across keyring, filesystem, env, singletons, and stdout."""
     _ACTIVE_REMOTE_FLOWS.clear()
+    clear_dynamic_secrets()
     unprotect_stdout()
     reset_session_manager()
     _reset_optional_m3_caches()
@@ -130,6 +132,7 @@ async def isolated_opaque_env(
         yield tmp_path
     finally:
         _ACTIVE_REMOTE_FLOWS.clear()
+        clear_dynamic_secrets()
         try:
             mgr = get_session_manager()
             await mgr.shutdown()

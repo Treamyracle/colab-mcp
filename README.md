@@ -172,17 +172,20 @@ Opens a real Google Chrome window (`--remote-debugging-port=9222`) for interacti
 
 ## 🛠️ Complete MCP Tool Reference
 
-`colab-mcp` exposes **19 MCP tools** across four categories:
+`colab-mcp` exposes **24 MCP tools** across four categories:
 
-### 1. Authentication Tools (3)
+### 1. Authentication & Secrets Vault Tools (6)
 
 | Tool Name | Key Parameters | Description |
 |---|---|---|
 | `colab_login` | `method`, `auth_user_index`, `auth_code`, `cookies`, `timeout_seconds` | Authenticate with Google Colab via OAuth 2.0 (`oauth_remote`, `oauth_loopback`, `oauth_adc`), `cdp_browser`, or `cookie_import`. |
 | `colab_get_auth_status` | `auth_user_index` (default `0`), `force_refresh` (`false`) | Query active account email, token validity, Colab subscription tier, CCU balance, and active assignment count. |
 | `colab_logout` | `auth_user_index` (default `0`), `terminate_active_runtimes` (`true`) | Purge stored credentials from the OS keystore and optionally terminate active runtimes. |
+| `colab_set_secret` | `name`, `value`, `runtime_id` (optional) | Encrypt and store a token/secret (e.g. `HF_TOKEN`, `WANDB_API_KEY`) in the OS keyring vault, register it for egress redaction, and inject into `os.environ` & `google.colab.userdata`. |
+| `colab_list_secrets` | *(none)* | List stored secret names and masked previews without exposing plaintext values. |
+| `colab_delete_secret` | `name`, `runtime_id` (optional) | Remove a secret from the encrypted vault and unset it on any connected kernel. |
 
-### 2. Runtime & Session Management Tools (5)
+### 2. Runtime, Session & Telemetry Tools (6)
 
 | Tool Name | Key Parameters | Description |
 |---|---|---|
@@ -190,16 +193,18 @@ Opens a real Google Chrome window (`--remote-debugging-port=9222`) for interacti
 | `colab_list_sessions` | `auth_user_index` (default `0`), `probe_kernels` (`true`) | List all active remote and locally tracked Colab VM sessions (including browser or prior-run sessions) with live kernel state. |
 | `colab_connect_runtime` | `accelerator`, `high_ram`, `reuse_existing` (`true`), `auth_user_index`, `timeout_seconds` | Provision a new Colab VM or re-attach to an existing matching session and initialize keep-alive heartbeat. |
 | `colab_get_runtime_status` | `runtime_id` (optional) | Inspect VM health, live kernel execution state, uptime, idle timer, and keep-alive status. |
+| `colab_get_system_metrics` | `runtime_id` (optional) | Inspect live GPU VRAM usage, GPU utilization %, system RAM, and `/content` disk usage on the connected VM. |
 | `colab_disconnect_runtime` | `runtime_id` (optional), `disconnect_all` (`false`), `auth_user_index` (`0`) | Terminate one local/remote Colab VM by `runtime_id` or all sessions (`disconnect_all=True`) via TFE `/unassign`. |
 
-### 3. Code & Notebook Execution Tools (5)
+### 3. Code, Stdin & Notebook Execution Tools (6)
 
 | Tool Name | Key Parameters | Description |
 |---|---|---|
-| `colab_execute_code` | `code`, `runtime_id`, `timeout_seconds`, `wait_for_completion`, `store_history`, `max_text_lines`, `max_output_bytes`, `max_images` | Execute Python code or IPython magic commands (`!nvidia-smi`, `%timeit`); returns chronological `TextContent` and `ImageContent` blocks. |
-| `colab_execute_notebook` | `notebook_path` \| `notebook_content`, `reset_kernel_before_run`, `cell_indices`, `stop_on_error`, `timeout_per_cell_seconds`, `output_save_path` | Parse (`nbformat` v4) and execute `.ipynb` notebooks sequentially or selectively with structured diagnostics and disk serialization. |
-| `colab_get_execution_status` | `execution_id` | Poll execution progress, elapsed time, and partial stdout tail for async jobs (`wait_for_completion=False`). |
+| `colab_execute_code` | `code`, `runtime_id`, `timeout_seconds`, `wait_for_completion`, `store_history`, `max_text_lines`, `max_output_bytes`, `max_images`, `stdin_inputs`, `env` | Execute Python code or IPython magic (`!nvidia-smi`, `%timeit`); returns chronological `TextContent` and `ImageContent` blocks. Supports `stdin_inputs` (`$SECRET:<NAME>` allowed) and `env` overrides. |
+| `colab_execute_notebook` | `notebook_path` \| `notebook_content`, `reset_kernel_before_run`, `cell_indices`, `stop_on_error`, `timeout_per_cell_seconds`, `output_save_path`, `stdin_inputs`, `env` | Parse (`nbformat` v4) and execute `.ipynb` notebooks sequentially or selectively with headless Colab shims, diagnostics, and disk serialization. |
+| `colab_get_execution_status` | `execution_id` | Poll execution progress, elapsed time, `waiting_for_input` prompt state, and partial stdout tail for async jobs. |
 | `colab_get_cell_output` | `execution_id`, `include_images`, `max_text_lines`, `max_output_bytes`, `max_images` | Retrieve full buffered outputs in strict chronological emission order for an execution job. |
+| `colab_send_input` | `execution_id`, `value` | Deliver a `stdin` reply (`$SECRET:<NAME>` supported) to an async execution blocked on `input()` or `getpass()`. |
 | `colab_interrupt_execution` | `runtime_id` (optional) | Send non-destructive SIGINT first; escalates to kernel restart after 5.0s if unresponsive, reporting `state_reset` and `kernel_restarted`. |
 
 ### 4. VM File Transfer & Google Drive Tools (6)
@@ -213,7 +218,7 @@ Opens a real Google Chrome window (`--remote-debugging-port=9222`) for interacti
 | `colab_drive_download` | `file_id_or_path`, `local_path`, `runtime_path`, `auth_user_index`, `runtime_id`, `quota_project_id` | Download a file from Google Drive to local disk and/or directly onto the connected Colab VM. |
 | `colab_drive_upload` | `local_path` \| `runtime_path`, `drive_folder`, `file_name`, `auth_user_index`, `runtime_id`, `quota_project_id` | Upload a file from local disk or directly from the Colab VM into Google Drive. |
 
-> **Note on Google Drive in Headless Mode:** Colab's interactive `google.colab.drive.mount('/content/drive')` relies on a browser frontend dialog and will time out over headless WebSockets. Use `colab_upload_file` / `colab_download_file` for direct VM transfers, or configure `COLAB_MCP_GCP_PROJECT` (with Drive API enabled) to use `colab_drive_*` REST tools.
+> **Headless Colab Popup Handling:** `colab-mcp` automatically injects headless shims into connected kernels so `google.colab.userdata.get(...)`, `google.colab.auth.authenticate_user()`, `google.colab.files.upload()` / `files.download()`, and `google.colab.drive.mount('/content/drive')` (Option A: creates `/content/drive/MyDrive` workspace cleanly without blocking) work without browser UI modals. Use `colab_drive_upload` / `colab_drive_download` to sync files directly with Google Drive.
 
 ---
 
@@ -224,6 +229,9 @@ Opens a real Google Chrome window (`--remote-debugging-port=9222`) for interacti
 | `run` | `colab-mcp run --transport stdio` | Start the MCP server (`stdio` or `sse` with `--host` and `--port`). |
 | `login` | `colab-mcp login --method oauth_remote` | Authenticate a Google account and save encrypted credentials. |
 | `status` | `colab-mcp status --force-refresh` | Show authentication status, tier, CCU balance, and active runtime state. |
+| `set-secret` | `colab-mcp set-secret HF_TOKEN` | Encrypt and store a token/secret in the vault via hidden prompt or `--value`. |
+| `list-secrets` | `colab-mcp list-secrets` | List stored secret names and masked previews. |
+| `delete-secret` | `colab-mcp delete-secret HF_TOKEN` | Remove a stored secret/token from the vault. |
 | `list-runtimes` | `colab-mcp list-runtimes` | List available hardware accelerators and hourly CCU rates. |
 | `list-sessions` | `colab-mcp list-sessions` | List all active remote and locally tracked Colab sessions. |
 | `disconnect` | `colab-mcp disconnect --all` | Terminate a specific runtime (`--runtime-id`) or all sessions (`--all`). |
