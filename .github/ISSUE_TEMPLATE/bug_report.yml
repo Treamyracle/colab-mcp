@@ -1,0 +1,75 @@
+name: Bug Report
+description: Report a bug, protocol mismatch, or runtime execution error in colab-mcp
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting an issue! Please fill in the environment details below and **make sure any logs are redacted** (never paste OAuth tokens, refresh tokens, `SAPISID`, or `OSID` cookies).
+
+  - type: input
+    id: mcp-host
+    attributes:
+      label: MCP Host / Client
+      description: Which client were you running colab-mcp from?
+      placeholder: e.g., Claude Desktop, Cursor, Antigravity, standalone CLI
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python Version
+      placeholder: e.g., 3.12.4
+    validations:
+      required: true
+
+  - type: dropdown
+    id: colab-tier
+    attributes:
+      label: Google Colab Tier
+      options:
+        - Free
+        - Colab Pro
+        - Colab Pro+
+        - Pay As You Go
+        - Unknown / Offline CLI
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: Tool calls, CLI commands, or minimal snippet that triggered the issue.
+      placeholder: |
+        1. Run `colab-mcp login`
+        2. Call `colab_connect_runtime` with ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-vs-actual
+    attributes:
+      label: Expected vs. Actual Behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted Logs / Traceback
+      description: Paste stderr logs or exception tracebacks with tokens and cookies removed.
+      render: text
