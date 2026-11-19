@@ -853,6 +853,7 @@ def register_kernel_tools(mcp: MCPServer) -> None:
             "outputs (e.g. Matplotlib charts as ImageContent), and sanitized error tracebacks "
             "in strict chronological order with automatic head-tail truncation."
         ),
+        structured_output=False,
     )
     async def _tool_colab_execute_code(
         code: str,
@@ -915,6 +916,7 @@ def register_kernel_tools(mcp: MCPServer) -> None:
             "ImageContent blocks) for an asynchronous or completed execution job in "
             "strict chronological order."
         ),
+        structured_output=False,
     )
     async def _tool_colab_get_cell_output(
         execution_id: str,
