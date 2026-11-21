@@ -13,6 +13,14 @@ Authenticate with your Google account, provision CPU/GPU/TPU runtimes, execute P
 
 ---
 
+## 🎬 Demo
+
+![colab-mcp T4 GPU CLI Demo](docs/assets/demo.gif)
+
+> `colab-mcp connect-runtime --accelerator T4` → `colab-mcp execute-code` → `colab-mcp system-metrics` ([asciinema cast](docs/assets/demo.cast)).
+
+---
+
 ## 🌟 Key Features
 
 - **Consumer Colab Automation:** Connects directly to Google Colab's Tunnel Frontend (TFE) without requiring enterprise GCP / Vertex AI configurations.

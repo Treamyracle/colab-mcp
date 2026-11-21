@@ -1,0 +1,20 @@
+# Smithery configuration file: https://smithery.ai/docs/config#smitheryyaml
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties: {}
+    default: {}
+  commandFunction: |-
+    (config) => ({
+      command: "uvx",
+      args: [
+        "--from",
+        "git+https://github.com/Treamyracle/colab-mcp.git",
+        "colab-mcp",
+        "run",
+        "--transport",
+        "stdio"
+      ]
+    })
+  exampleConfig: {}

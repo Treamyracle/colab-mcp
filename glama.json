@@ -1,0 +1,11 @@
+{
+  "$schema": "https://glama.ai/mcp/schemas/server.json",
+  "name": "colab-mcp",
+  "description": "Full-parity CLI & Model Context Protocol (MCP) server for consumer Google Colab GPU/TPU runtimes, interactive Python/Jupyter execution, encrypted secrets vault, and Google Drive.",
+  "maintainers": [
+    "Treamyracle"
+  ],
+  "transport": [
+    "stdio"
+  ]
+}
