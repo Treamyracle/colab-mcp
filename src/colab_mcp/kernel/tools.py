@@ -535,6 +535,7 @@ async def execute_code_impl(
     *,
     _client_getter: Optional[Callable[[Optional[str]], Awaitable[Any]]] = None,
     _registry_getter: Optional[Callable[[], Any]] = None,
+    _on_input_request: Optional[Callable[[str, bool, Dict[str, Any]], Awaitable[Optional[str]]]] = None,
 ) -> tuple[List[MCPContentBlock] | Dict[str, Any], bool]:
     """
     Core logic for ``colab_execute_code`` returning ``(payload, has_error)``.
@@ -620,6 +621,10 @@ async def execute_code_impl(
             }
             if isinstance(client, KernelWebSocketClient) or resolved_inputs is not None:
                 sync_kwargs["stdin_inputs"] = resolved_inputs
+            if _on_input_request is not None and (
+                isinstance(client, KernelWebSocketClient) or _is_configured_mock_method(client, "execute_raw")
+            ):
+                sync_kwargs["on_input_request"] = _on_input_request
             raw = await client.execute_raw(**sync_kwargs)
             blocks = convert_iopub_to_mcp_blocks(
                 raw.iopub_messages,

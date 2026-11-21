@@ -1006,3 +1006,45 @@ def test_t1_fa6_cli_lifecycle_commands_against_twin(cli_runner: Any, colab_twin:
 
     logout_res = cli_runner.invoke(cli_app, ["logout"])
     assert logout_res.exit_code == 0
+
+
+def test_t1_fa6_cli_stateful_runtime_exec_and_disconnect_against_twin(
+    cli_runner: Any,
+    colab_twin: ColabTwin,
+    tmp_path: Path,
+) -> None:
+    """FA6.6: Stateful CLI flow: login -> connect-runtime -> execute-code (with plot) -> system-metrics -> disconnect."""
+    code = colab_twin.issue_auth_code("cli-full-code", auth_user_index=0, email="clifull@example.com")
+    assert cli_runner.invoke(cli_app, ["login", "--method", "oauth_remote", "--auth-code", code]).exit_code == 0
+
+    conn_res = cli_runner.invoke(cli_app, ["connect-runtime", "--accelerator", "T4", "--json"])
+    assert conn_res.exit_code == 0
+    conn_data = json.loads(conn_res.stdout)
+    assert conn_data["status"] == "connected"
+    rid = conn_data["runtime_id"]
+
+    plots_dir = tmp_path / "cli_plots"
+    exec_res = cli_runner.invoke(
+        cli_app,
+        [
+            "execute-code",
+            "import matplotlib.pyplot as plt\nprint('cli-exec-ok')\nplt.plot([1, 2], [3, 4])\nplt.show()",
+            "--save-images-dir",
+            str(plots_dir),
+            "--json",
+        ],
+    )
+    assert exec_res.exit_code == 0
+    exec_data = json.loads(exec_res.stdout)
+    assert exec_data["has_error"] is False
+    assert (plots_dir / "plot_001.png").is_file()
+
+    metrics_res = cli_runner.invoke(cli_app, ["system-metrics", "--json"])
+    assert metrics_res.exit_code == 0
+    assert json.loads(metrics_res.stdout)["runtime_id"] == rid
+
+    disc_res = cli_runner.invoke(cli_app, ["disconnect", "--json"])
+    assert disc_res.exit_code == 0
+    assert json.loads(disc_res.stdout)["terminated_count"] >= 1
+
+    assert cli_runner.invoke(cli_app, ["logout"]).exit_code == 0

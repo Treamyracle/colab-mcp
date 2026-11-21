@@ -203,19 +203,25 @@ def test_cli_secret_commands_roundtrip(
     mock_machine_id: bytes,
 ):
     runner = CliRunner()
-    res_set = runner.invoke(cli_app, ["set-secret", "OPENAI_API_KEY", "--value", "sk-test-123456"])
+    res_set = runner.invoke(cli_app, ["set-secret", "OPENAI_API_KEY", "--value", "sk-test-123456", "--json"])
     assert res_set.exit_code == 0
     payload_set = json.loads(res_set.stdout)
     assert payload_set["name"] == "OPENAI_API_KEY"
     assert "sk-test-123456" not in res_set.stdout
 
-    res_list = runner.invoke(cli_app, ["list-secrets"])
+    # Human default format
+    res_list_human = runner.invoke(cli_app, ["list-secrets"])
+    assert res_list_human.exit_code == 0
+    assert "OPENAI_API_KEY" in res_list_human.stdout
+    assert "sk-test-123456" not in res_list_human.stdout
+
+    res_list = runner.invoke(cli_app, ["list-secrets", "--json"])
     assert res_list.exit_code == 0
     payload_list = json.loads(res_list.stdout)
     assert payload_list["count"] == 1
     assert payload_list["secrets"][0]["name"] == "OPENAI_API_KEY"
 
-    res_del = runner.invoke(cli_app, ["delete-secret", "OPENAI_API_KEY"])
+    res_del = runner.invoke(cli_app, ["delete-secret", "OPENAI_API_KEY", "--json"])
     assert res_del.exit_code == 0
     assert json.loads(res_del.stdout)["existed"] is True
 

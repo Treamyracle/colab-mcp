@@ -1,20 +1,44 @@
-"""CLI entry point for colab-mcp."""
+"""CLI entry point for ``colab-mcp`` providing full parity with the MCP server."""
 
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
-from typing import Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import typer
 
-from colab_mcp.utils.logging import StderrProxy, unprotect_stdout
-from colab_mcp.utils.redaction import redact_credentials, redact_data
+from colab_mcp.cli_output import (
+    CLIExitCode,
+    emit_error,
+    emit_json,
+    ensure_cli_stdout,
+    render_auth_status,
+    render_drive_files,
+    render_execution_blocks,
+    render_key_values,
+    render_notebook_summary,
+    render_remote_files,
+    render_runtimes,
+    render_secrets,
+    render_sessions,
+    render_system_metrics,
+    save_image_blocks,
+)
+from colab_mcp.cli_session import (
+    CLISessionState,
+    cleanup_cli_runtime_resources,
+    clear_cli_session,
+    ensure_cli_runtime_attached,
+    load_cli_session,
+    save_cli_session,
+)
+from colab_mcp.utils.redaction import redact_credentials
 
 app = typer.Typer(
     name="colab-mcp",
-    help="Google Colab Model Context Protocol (MCP) Server CLI",
+    help="Google Colab CLI & Model Context Protocol (MCP) Server",
     no_args_is_help=True,
 )
 
@@ -22,30 +46,65 @@ _VALID_TRANSPORTS = ("stdio", "sse")
 _VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 
-def _ensure_cli_stdout() -> None:
-    """Restore interactive CLI stdout if a lazy import activated StderrProxy."""
-    if isinstance(sys.stdout, StderrProxy):
-        unprotect_stdout()
+def _validate_user_index(auth_user_index: int) -> None:
+    if auth_user_index < 0:
+        raise typer.BadParameter("auth_user_index must be >= 0.", param_hint="--auth-user-index")
 
 
-def _echo_json(payload: object) -> None:
-    _ensure_cli_stdout()
-    safe_payload = redact_data(payload)
-    typer.echo(json.dumps(safe_payload, indent=2))
+def _parse_env_pairs(env_items: Optional[List[str]]) -> Optional[Dict[str, str]]:
+    if not env_items:
+        return None
+    parsed: Dict[str, str] = {}
+    for item in env_items:
+        if "=" not in item:
+            raise ValueError(f"Invalid --env entry '{item}'. Expected KEY=VALUE format.")
+        key, val = item.split("=", 1)
+        if not key.strip():
+            raise ValueError(f"Invalid --env entry '{item}': key must be non-empty.")
+        parsed[key.strip()] = val
+    return parsed
 
 
-def _exit_with_error(exc: Exception, code: int = 1) -> None:
-    _ensure_cli_stdout()
-    typer.echo(f"Error: {redact_credentials(str(exc))}", err=True)
-    raise typer.Exit(code=code)
+def _resolve_code_input(code: Optional[str], file_path: Optional[Path]) -> str:
+    if code is not None and file_path is not None:
+        raise ValueError("Provide either positional CODE or --file PATH, not both.")
+    if file_path is not None:
+        if not file_path.is_file():
+            raise FileNotFoundError(f"Python file not found: '{file_path}'.")
+        return file_path.read_text(encoding="utf-8")
+    if code is None:
+        raise ValueError("Provide CODE argument, '-' to read from stdin, or --file PATH.")
+    if code == "-":
+        ensure_cli_stdout()
+        return sys.stdin.read()
+    return code
+
+
+def _run_with_json(fn_coro: Any, *, as_json: bool) -> Any:
+    try:
+        return asyncio.run(fn_coro)
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        emit_error(exc, as_json=as_json)
+
+
+# ============================================================================
+# 1. Server, Version & Host Setup Commands
+# ============================================================================
 
 
 @app.command("version")
-def version() -> None:
+def version(
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
+) -> None:
     """Print the colab-mcp version."""
     import colab_mcp
 
-    _ensure_cli_stdout()
+    ensure_cli_stdout()
+    if json_output:
+        emit_json({"version": colab_mcp.__version__})
+        return
     typer.echo(f"colab-mcp version: {colab_mcp.__version__}")
 
 
@@ -108,7 +167,80 @@ def run(
         )
     except Exception as exc:
         typer.echo(f"Error starting server: {redact_credentials(str(exc))}", err=True)
-        raise typer.Exit(code=1) from None
+        raise typer.Exit(code=int(CLIExitCode.ERROR)) from None
+
+
+@app.command("setup-mcp")
+def setup_mcp(
+    client: str = typer.Option(
+        "auto",
+        "--client",
+        "-c",
+        help="Target host: auto, claude-desktop, claude-code, cursor, antigravity, vscode.",
+    ),
+    config_path: Optional[str] = typer.Option(
+        None,
+        "--config-path",
+        help="Override target MCP JSON config file path.",
+    ),
+    server_name: str = typer.Option(
+        "colab",
+        "--server-name",
+        help="Server key name inside mcpServers/servers.",
+    ),
+    command_mode: str = typer.Option(
+        "auto",
+        "--command",
+        help="Launcher mode: auto, uvx, or python.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Preview changes without writing config files.",
+    ),
+    remove: bool = typer.Option(
+        False,
+        "--remove",
+        help="Remove the colab entry from the target MCP config.",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
+) -> None:
+    """Auto-configure MCP hosts (Claude Desktop, Claude Code, Cursor, Antigravity, VS Code)."""
+    from colab_mcp.cli_setup import configure_mcp_clients
+
+    try:
+        resp = configure_mcp_clients(
+            client=client,
+            config_path=config_path,
+            server_name=server_name,
+            command_mode=command_mode,
+            dry_run=dry_run,
+            remove=remove,
+        )
+    except Exception as exc:
+        emit_error(exc, as_json=json_output)
+
+    if json_output:
+        emit_json(resp.model_dump(mode="json"))
+        return
+
+    ensure_cli_stdout()
+    if not resp.results:
+        typer.echo(
+            "No supported MCP host directories detected. Specify --client (e.g. cursor, claude-desktop) or --config-path."
+        )
+        return
+
+    rows = [
+        (f"{r.client} ({r.action}{', dry-run' if r.dry_run else ''})", r.config_path)
+        for r in resp.results
+    ]
+    render_key_values(f"MCP Host Setup ({resp.status})", rows)
+
+
+# ============================================================================
+# 2. Authentication & Secret Vault Commands
+# ============================================================================
 
 
 @app.command("login")
@@ -136,10 +268,10 @@ def login(
         "--timeout",
         help="Timeout in seconds (30-600) for interactive login flows.",
     ),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
 ) -> None:
     """Authenticate with Google Colab and persist credentials securely."""
-    if auth_user_index < 0:
-        raise typer.BadParameter("auth_user_index must be >= 0.", param_hint="--auth-user-index")
+    _validate_user_index(auth_user_index)
     if not (30 <= timeout_seconds <= 600):
         raise typer.BadParameter(
             "timeout_seconds must be between 30 and 600.",
@@ -148,16 +280,14 @@ def login(
 
     from colab_mcp.auth.tools import colab_login_impl
 
-    try:
-        resp = asyncio.run(
-            colab_login_impl(
-                method=method,
-                auth_user_index=auth_user_index,
-                auth_code=auth_code,
-                timeout_seconds=timeout_seconds,
-            )
+    async def _do_login():
+        resp = await colab_login_impl(
+            method=method,
+            auth_user_index=auth_user_index,
+            auth_code=auth_code,
+            timeout_seconds=timeout_seconds,
         )
-        _ensure_cli_stdout()
+        ensure_cli_stdout()
         if (
             resp.status == "authorization_required"
             and method == "oauth_remote"
@@ -166,19 +296,29 @@ def login(
         ):
             typer.echo(f"Authorization URL:\n{redact_credentials(resp.auth_url)}")
             entered_code = typer.prompt("Enter authorization code").strip()
-            resp = asyncio.run(
-                colab_login_impl(
-                    method=method,
-                    auth_user_index=auth_user_index,
-                    auth_code=entered_code,
-                    timeout_seconds=timeout_seconds,
-                )
+            resp = await colab_login_impl(
+                method=method,
+                auth_user_index=auth_user_index,
+                auth_code=entered_code,
+                timeout_seconds=timeout_seconds,
             )
-        _echo_json(resp.model_dump(mode="json"))
-    except typer.Exit:
-        raise
-    except Exception as exc:
-        _exit_with_error(exc)
+        return resp
+
+    resp = _run_with_json(_do_login(), as_json=json_output)
+    if json_output:
+        emit_json(resp.model_dump(mode="json"))
+        return
+
+    render_key_values(
+        "Google Colab Login",
+        [
+            ("Status", resp.status),
+            ("Method", resp.auth_method),
+            ("User Index", resp.auth_user_index),
+            ("Email", resp.user_email or "-"),
+            ("Message", resp.message),
+        ],
+    )
 
 
 @app.command("status")
@@ -194,143 +334,45 @@ def status(
         "--force-refresh",
         help="Perform an active token refresh and Colab TFE CCU check.",
     ),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
 ) -> None:
     """Display authentication status, account tier, CCU balance, and runtime state."""
-    if auth_user_index < 0:
-        raise typer.BadParameter("auth_user_index must be >= 0.", param_hint="--auth-user-index")
+    _validate_user_index(auth_user_index)
 
     from colab_mcp.auth.tools import colab_get_auth_status_impl
     from colab_mcp.runtime.tools import get_runtime_status_impl
 
-    try:
-        auth_resp = asyncio.run(
-            colab_get_auth_status_impl(
+    async def _gather():
+        try:
+            auth_resp = await colab_get_auth_status_impl(
                 auth_user_index=auth_user_index,
                 force_refresh=force_refresh,
             )
-        )
-        payload = auth_resp.model_dump(mode="json")
-        try:
-            rt_resp = asyncio.run(get_runtime_status_impl())
-            if rt_resp.status == "active":
-                payload["active_runtime"] = rt_resp.model_dump(mode="json")
-        except Exception:
-            pass
-        _echo_json(payload)
-    except typer.Exit:
-        raise
-    except Exception as exc:
-        _exit_with_error(exc)
+            payload = auth_resp.model_dump(mode="json")
+            saved = load_cli_session()
+            if saved is not None and auth_resp.is_authenticated:
+                try:
+                    await ensure_cli_runtime_attached(
+                        runtime_id=saved.runtime_id,
+                        auth_user_index=auth_user_index,
+                    )
+                except Exception:
+                    pass
+            try:
+                rt_resp = await get_runtime_status_impl()
+                if rt_resp.status == "active":
+                    payload["active_runtime"] = rt_resp.model_dump(mode="json")
+            except Exception:
+                pass
+            return payload
+        finally:
+            await cleanup_cli_runtime_resources()
 
-
-@app.command("list-runtimes")
-def list_runtimes(
-    auth_user_index: int = typer.Option(
-        0,
-        "--auth-user-index",
-        "-u",
-        help="Google multi-account user index (>= 0).",
-    ),
-) -> None:
-    """List available Colab hardware accelerators, RAM shapes, and hourly CCU rates."""
-    if auth_user_index < 0:
-        raise typer.BadParameter("auth_user_index must be >= 0.", param_hint="--auth-user-index")
-
-    from colab_mcp.runtime.tools import list_runtime_types_impl
-
-    try:
-        resp = asyncio.run(list_runtime_types_impl(auth_user_index=auth_user_index))
-        _ensure_cli_stdout()
-        tier_label = resp.account_tier or "UNKNOWN"
-        typer.echo(redact_credentials(f"Account Tier: {tier_label}"))
-        for item in resp.available_accelerators:
-            vram = item.vram or "None"
-            avail = "available" if item.available else "unavailable"
-            line = (
-                f"- {item.accelerator} ({item.variant}): {item.display_name} | "
-                f"VRAM: {vram} | RAM: {item.system_ram} | "
-                f"{item.ccu_cost_per_hour:.2f} CCU/hr | {avail}"
-            )
-            typer.echo(redact_credentials(line))
-    except typer.Exit:
-        raise
-    except Exception as exc:
-        _exit_with_error(exc)
-
-
-@app.command("list-sessions")
-def list_sessions(
-    auth_user_index: int = typer.Option(
-        0,
-        "--auth-user-index",
-        "-u",
-        help="Google multi-account user index (>= 0).",
-    ),
-    probe_kernels: bool = typer.Option(
-        True,
-        "--probe-kernels/--no-probe-kernels",
-        help="Probe active runtime proxies for live Jupyter kernel state.",
-    ),
-) -> None:
-    """List all active remote and locally tracked Google Colab sessions."""
-    if auth_user_index < 0:
-        raise typer.BadParameter("auth_user_index must be >= 0.", param_hint="--auth-user-index")
-
-    from colab_mcp.runtime.tools import list_sessions_impl
-
-    try:
-        resp = asyncio.run(
-            list_sessions_impl(
-                auth_user_index=auth_user_index,
-                probe_kernels=probe_kernels,
-            )
-        )
-        _echo_json(resp.model_dump(mode="json"))
-    except typer.Exit:
-        raise
-    except Exception as exc:
-        _exit_with_error(exc)
-
-
-@app.command("disconnect")
-def disconnect(
-    runtime_id: Optional[str] = typer.Option(
-        None,
-        "--runtime-id",
-        "-r",
-        help="Target Colab runtime endpoint ID to terminate.",
-    ),
-    disconnect_all: bool = typer.Option(
-        False,
-        "--all",
-        help="Terminate all active local and remote Colab sessions.",
-    ),
-    auth_user_index: int = typer.Option(
-        0,
-        "--auth-user-index",
-        "-u",
-        help="Google multi-account user index (>= 0).",
-    ),
-) -> None:
-    """Terminate one or all active Google Colab runtime sessions."""
-    if auth_user_index < 0:
-        raise typer.BadParameter("auth_user_index must be >= 0.", param_hint="--auth-user-index")
-
-    from colab_mcp.runtime.tools import disconnect_runtime_impl
-
-    try:
-        resp = asyncio.run(
-            disconnect_runtime_impl(
-                runtime_id=runtime_id,
-                disconnect_all=disconnect_all,
-                auth_user_index=auth_user_index,
-            )
-        )
-        _echo_json(resp.model_dump(mode="json"))
-    except typer.Exit:
-        raise
-    except Exception as exc:
-        _exit_with_error(exc)
+    payload = _run_with_json(_gather(), as_json=json_output)
+    if json_output:
+        emit_json(payload)
+        return
+    render_auth_status(payload)
 
 
 @app.command("logout")
@@ -346,25 +388,38 @@ def logout(
         "--terminate-active-runtimes/--no-terminate-active-runtimes",
         help="Terminate active Colab runtimes before purging credentials.",
     ),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
 ) -> None:
     """Purge stored credentials and optionally terminate active Colab runtimes."""
-    if auth_user_index < 0:
-        raise typer.BadParameter("auth_user_index must be >= 0.", param_hint="--auth-user-index")
+    _validate_user_index(auth_user_index)
 
     from colab_mcp.auth.tools import colab_logout_impl
 
-    try:
-        resp = asyncio.run(
-            colab_logout_impl(
+    async def _do_logout():
+        try:
+            resp = await colab_logout_impl(
                 auth_user_index=auth_user_index,
                 terminate_active_runtimes=terminate_active_runtimes,
             )
-        )
-        _echo_json(resp.model_dump(mode="json"))
-    except typer.Exit:
-        raise
-    except Exception as exc:
-        _exit_with_error(exc)
+            clear_cli_session()
+            return resp
+        finally:
+            await cleanup_cli_runtime_resources()
+
+    resp = _run_with_json(_do_logout(), as_json=json_output)
+    if json_output:
+        emit_json(resp.model_dump(mode="json"))
+        return
+
+    render_key_values(
+        "Logged Out",
+        [
+            ("Status", resp.status),
+            ("User Index", resp.auth_user_index),
+            ("Keystore Purged", resp.keystore_purged),
+            ("Terminated Runtimes", resp.terminated_runtimes_count),
+        ],
+    )
 
 
 @app.command("set-secret")
@@ -376,6 +431,7 @@ def set_secret_cmd(
         "-v",
         help="Secret value. Omit to enter securely via hidden prompt.",
     ),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
 ) -> None:
     """Encrypt and store a secret/token in the colab-mcp vault."""
     from colab_mcp.auth.secrets import set_secret
@@ -383,57 +439,1030 @@ def set_secret_cmd(
     try:
         secret_value = value
         if secret_value is None:
-            _ensure_cli_stdout()
+            ensure_cli_stdout()
             secret_value = typer.prompt(f"Enter value for {name}", hide_input=True)
         meta = set_secret(name=name, value=secret_value)
-        _echo_json({
-            "status": "stored",
-            "name": meta.name,
-            "masked_preview": meta.masked_preview,
-            "length": meta.length,
-            "updated_at": meta.updated_at.isoformat(),
-        })
     except typer.Exit:
         raise
     except Exception as exc:
-        _exit_with_error(exc)
+        emit_error(exc, as_json=json_output)
+
+    payload = {
+        "status": "stored",
+        "name": meta.name,
+        "masked_preview": meta.masked_preview,
+        "length": meta.length,
+        "updated_at": meta.updated_at.isoformat(),
+    }
+    if json_output:
+        emit_json(payload)
+        return
+
+    render_key_values(
+        "Secret Stored",
+        [
+            ("Name", meta.name),
+            ("Preview", meta.masked_preview),
+            ("Length", meta.length),
+            ("Updated", meta.updated_at.isoformat()),
+        ],
+    )
 
 
 @app.command("list-secrets")
-def list_secrets_cmd() -> None:
+def list_secrets_cmd(
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
+) -> None:
     """List stored secret names and masked previews from the colab-mcp vault."""
     from colab_mcp.auth.secrets import list_secrets
 
     try:
         items = list_secrets()
-        _echo_json({
-            "count": len(items),
-            "secrets": [m.model_dump(mode="json") for m in items],
-        })
-    except typer.Exit:
-        raise
     except Exception as exc:
-        _exit_with_error(exc)
+        emit_error(exc, as_json=json_output)
+
+    if json_output:
+        emit_json({"count": len(items), "secrets": [m.model_dump(mode="json") for m in items]})
+        return
+    render_secrets(items)
 
 
 @app.command("delete-secret")
 def delete_secret_cmd(
     name: str = typer.Argument(..., help="Secret name to remove from the vault."),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
 ) -> None:
     """Delete a stored secret/token from the colab-mcp vault."""
     from colab_mcp.auth.secrets import delete_secret
 
     try:
         existed = delete_secret(name=name)
-        _echo_json({
-            "status": "deleted",
-            "name": name.strip(),
-            "existed": existed,
-        })
-    except typer.Exit:
-        raise
     except Exception as exc:
-        _exit_with_error(exc)
+        emit_error(exc, as_json=json_output)
+
+    clean_name = name.strip()
+    if json_output:
+        emit_json({"status": "deleted", "name": clean_name, "existed": existed})
+        return
+
+    ensure_cli_stdout()
+    if existed:
+        typer.echo(f"Deleted secret '{clean_name}' from vault.")
+    else:
+        typer.echo(f"Secret '{clean_name}' was not present in vault.")
+
+
+# ============================================================================
+# 3. Runtime Lifecycle & Hardware Telemetry Commands
+# ============================================================================
+
+
+@app.command("list-runtimes")
+def list_runtimes(
+    auth_user_index: int = typer.Option(
+        0,
+        "--auth-user-index",
+        "-u",
+        help="Google multi-account user index (>= 0).",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
+) -> None:
+    """List available Colab hardware accelerators, RAM shapes, and hourly CCU rates."""
+    _validate_user_index(auth_user_index)
+
+    from colab_mcp.runtime.tools import list_runtime_types_impl
+
+    resp = _run_with_json(
+        list_runtime_types_impl(auth_user_index=auth_user_index),
+        as_json=json_output,
+    )
+    if json_output:
+        emit_json(resp.model_dump(mode="json"))
+        return
+    render_runtimes(resp.account_tier, resp.available_accelerators)
+
+
+@app.command("list-sessions")
+def list_sessions(
+    auth_user_index: int = typer.Option(
+        0,
+        "--auth-user-index",
+        "-u",
+        help="Google multi-account user index (>= 0).",
+    ),
+    probe_kernels: bool = typer.Option(
+        True,
+        "--probe-kernels/--no-probe-kernels",
+        help="Probe active runtime proxies for live Jupyter kernel state.",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
+) -> None:
+    """List all active remote and locally tracked Google Colab sessions."""
+    _validate_user_index(auth_user_index)
+
+    from colab_mcp.runtime.tools import list_sessions_impl
+
+    async def _list():
+        try:
+            return await list_sessions_impl(
+                auth_user_index=auth_user_index,
+                probe_kernels=probe_kernels,
+            )
+        finally:
+            await cleanup_cli_runtime_resources()
+
+    resp = _run_with_json(_list(), as_json=json_output)
+    saved = load_cli_session()
+    active_id = resp.active_runtime_id or (saved.runtime_id if saved else None)
+    if json_output:
+        payload = resp.model_dump(mode="json")
+        if payload.get("active_runtime_id") is None and active_id is not None:
+            payload["active_runtime_id"] = active_id
+        emit_json(payload)
+        return
+    render_sessions(resp.sessions, active_id)
+
+
+@app.command("connect-runtime")
+def connect_runtime(
+    accelerator: str = typer.Option(
+        "NONE",
+        "--accelerator",
+        "-a",
+        help="Hardware accelerator: NONE, T4, L4, A100, H100, V5E1, V6E1.",
+    ),
+    high_ram: bool = typer.Option(
+        False,
+        "--high-ram",
+        help="Request High-RAM VM shape (Pro/Pro+ only).",
+    ),
+    reuse_existing: bool = typer.Option(
+        True,
+        "--reuse-existing/--no-reuse-existing",
+        help="Reuse an existing matching active session if available.",
+    ),
+    auth_user_index: int = typer.Option(
+        0,
+        "--auth-user-index",
+        "-u",
+        help="Google multi-account user index (>= 0).",
+    ),
+    timeout_seconds: int = typer.Option(
+        120,
+        "--timeout-seconds",
+        "--timeout",
+        help="Provisioning timeout in seconds (30-300).",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
+) -> None:
+    """Provision or re-attach a Colab runtime and persist the active CLI session."""
+    _validate_user_index(auth_user_index)
+
+    from colab_mcp.runtime.tools import connect_runtime_impl
+
+    async def _connect():
+        try:
+            resp = await connect_runtime_impl(
+                accelerator=accelerator,
+                high_ram=high_ram,
+                reuse_existing=reuse_existing,
+                auth_user_index=auth_user_index,
+                timeout_seconds=timeout_seconds,
+            )
+            save_cli_session(
+                CLISessionState(
+                    runtime_id=resp.runtime_id,
+                    kernel_id=resp.kernel_id,
+                    accelerator=resp.accelerator,
+                    variant=resp.variant,
+                    high_ram=resp.high_ram,
+                    auth_user_index=auth_user_index,
+                )
+            )
+            return resp
+        finally:
+            await cleanup_cli_runtime_resources()
+
+    resp = _run_with_json(_connect(), as_json=json_output)
+    if json_output:
+        emit_json(resp.model_dump(mode="json"))
+        return
+
+    render_key_values(
+        "Connected Colab Runtime",
+        [
+            ("Runtime ID", resp.runtime_id),
+            ("Accelerator", f"{resp.accelerator} ({resp.variant})"),
+            ("High RAM", resp.high_ram),
+            ("Reused Existing", resp.reused_existing),
+            ("Kernel ID", resp.kernel_id or "-"),
+            ("Kernel State", resp.kernel_state or "-"),
+        ],
+    )
+
+
+@app.command("runtime-status")
+def runtime_status(
+    runtime_id: Optional[str] = typer.Option(
+        None,
+        "--runtime-id",
+        "-r",
+        help="Target Colab runtime endpoint ID (defaults to active CLI session).",
+    ),
+    auth_user_index: Optional[int] = typer.Option(
+        None,
+        "--auth-user-index",
+        "-u",
+        help="Google multi-account user index override.",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
+) -> None:
+    """Inspect active VM health, kernel execution state, and uptime."""
+    if auth_user_index is not None:
+        _validate_user_index(auth_user_index)
+
+    from colab_mcp.runtime.tools import get_runtime_status_impl
+
+    async def _inspect():
+        try:
+            attached_id, _ = await ensure_cli_runtime_attached(
+                runtime_id=runtime_id,
+                auth_user_index=auth_user_index,
+            )
+            return await get_runtime_status_impl(runtime_id=attached_id)
+        finally:
+            await cleanup_cli_runtime_resources()
+
+    resp = _run_with_json(_inspect(), as_json=json_output)
+    if json_output:
+        emit_json(resp.model_dump(mode="json"))
+        return
+
+    render_key_values(
+        "Colab Runtime Status",
+        [
+            ("Runtime ID", resp.runtime_id or "-"),
+            ("Status", resp.status),
+            ("Kernel State", resp.kernel_state or "-"),
+            ("Accelerator", (resp.metrics or {}).get("accelerator", "-")),
+            ("High RAM", (resp.metrics or {}).get("high_ram", "-")),
+        ],
+    )
+
+
+@app.command("system-metrics")
+def system_metrics(
+    runtime_id: Optional[str] = typer.Option(
+        None,
+        "--runtime-id",
+        "-r",
+        help="Target Colab runtime endpoint ID (defaults to active CLI session).",
+    ),
+    auth_user_index: Optional[int] = typer.Option(
+        None,
+        "--auth-user-index",
+        "-u",
+        help="Google multi-account user index override.",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
+) -> None:
+    """Inspect live GPU VRAM, GPU utilization %, system RAM, and /content disk usage."""
+    if auth_user_index is not None:
+        _validate_user_index(auth_user_index)
+
+    from colab_mcp.runtime.tools import get_system_metrics_impl
+
+    async def _metrics():
+        try:
+            attached_id, _ = await ensure_cli_runtime_attached(
+                runtime_id=runtime_id,
+                auth_user_index=auth_user_index,
+            )
+            return await get_system_metrics_impl(runtime_id=attached_id)
+        finally:
+            await cleanup_cli_runtime_resources()
+
+    resp = _run_with_json(_metrics(), as_json=json_output)
+    if json_output:
+        emit_json(resp.model_dump(mode="json"))
+        return
+    render_system_metrics(resp)
+
+
+@app.command("disconnect")
+def disconnect(
+    runtime_id: Optional[str] = typer.Option(
+        None,
+        "--runtime-id",
+        "-r",
+        help="Target Colab runtime endpoint ID to terminate (defaults to active CLI session).",
+    ),
+    disconnect_all: bool = typer.Option(
+        False,
+        "--all",
+        help="Terminate all active local and remote Colab sessions.",
+    ),
+    auth_user_index: int = typer.Option(
+        0,
+        "--auth-user-index",
+        "-u",
+        help="Google multi-account user index (>= 0).",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
+) -> None:
+    """Terminate one or all active Google Colab runtime sessions."""
+    _validate_user_index(auth_user_index)
+
+    from colab_mcp.runtime.tools import disconnect_runtime_impl
+
+    async def _disconnect():
+        try:
+            saved = load_cli_session()
+            target_id = runtime_id
+            effective_user = auth_user_index
+            if target_id is None and not disconnect_all and saved is not None:
+                target_id = saved.runtime_id
+                if auth_user_index == 0:
+                    effective_user = saved.auth_user_index
+            resp = await disconnect_runtime_impl(
+                runtime_id=target_id,
+                disconnect_all=disconnect_all,
+                auth_user_index=effective_user,
+            )
+            if disconnect_all or target_id is None:
+                clear_cli_session()
+            else:
+                clear_cli_session(runtime_id=target_id)
+            return resp
+        finally:
+            await cleanup_cli_runtime_resources()
+
+    resp = _run_with_json(_disconnect(), as_json=json_output)
+    if json_output:
+        emit_json(resp.model_dump(mode="json"))
+        return
+
+    render_key_values(
+        "Disconnected Runtime",
+        [
+            ("Status", resp.status),
+            ("Runtime ID", resp.runtime_id or "-"),
+            ("Terminated Count", resp.terminated_count),
+            ("Terminated IDs", ", ".join(resp.terminated_runtime_ids) or "-"),
+            ("Message", resp.message),
+        ],
+    )
+
+
+# ============================================================================
+# 4. Code & Notebook Execution Commands
+# ============================================================================
+
+
+@app.command("execute-code")
+def execute_code(
+    code: Optional[str] = typer.Argument(
+        None,
+        help="Python code string, or '-' to read from stdin (omit when passing --file).",
+    ),
+    file: Optional[Path] = typer.Option(
+        None,
+        "--file",
+        "-f",
+        help="Path to a local Python script to execute on Colab.",
+    ),
+    runtime_id: Optional[str] = typer.Option(
+        None,
+        "--runtime-id",
+        "-r",
+        help="Target Colab runtime endpoint ID (defaults to active CLI session).",
+    ),
+    auth_user_index: Optional[int] = typer.Option(
+        None,
+        "--auth-user-index",
+        "-u",
+        help="Google multi-account user index override.",
+    ),
+    timeout_seconds: int = typer.Option(
+        300,
+        "--timeout-seconds",
+        "--timeout",
+        help="Execution timeout in seconds (5-3600).",
+    ),
+    stdin_input: Optional[List[str]] = typer.Option(
+        None,
+        "--stdin-input",
+        help="Pre-supplied input() reply (repeatable; supports '$SECRET:<NAME>').",
+    ),
+    env: Optional[List[str]] = typer.Option(
+        None,
+        "--env",
+        "-e",
+        help="Environment variable override in KEY=VALUE format (repeatable).",
+    ),
+    save_images_dir: Optional[Path] = typer.Option(
+        None,
+        "--save-images-dir",
+        help="Directory to write Matplotlib/display images as PNG/JPEG files.",
+    ),
+    non_interactive: bool = typer.Option(
+        False,
+        "--non-interactive",
+        help="Fail immediately (exit 13) if code prompts via input()/getpass() without --stdin-input.",
+    ),
+    max_text_lines: int = typer.Option(1000, "--max-text-lines", help="Max output text lines."),
+    max_images: int = typer.Option(5, "--max-images", help="Max plot images to collect."),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
+) -> None:
+    """Execute Python code or IPython magic on the active Colab runtime."""
+    if auth_user_index is not None:
+        _validate_user_index(auth_user_index)
+
+    from colab_mcp.auth.secrets import resolve_secret_interpolation
+    from colab_mcp.kernel.tools import execute_code_impl
+
+    try:
+        source_code = _resolve_code_input(code, file)
+        env_map = _parse_env_pairs(env)
+    except Exception as exc:
+        emit_error(exc, as_json=json_output)
+
+    async def _interactive_stdin_cb(
+        prompt: str,
+        password: bool,
+        _header: Dict[str, Any],
+    ) -> Optional[str]:
+        def _ask() -> str:
+            ensure_cli_stdout()
+            label = prompt.rstrip() or ("Secret input" if password else "Input")
+            raw_val = typer.prompt(label, hide_input=password)
+            return resolve_secret_interpolation(str(raw_val))
+
+        return await asyncio.to_thread(_ask)
+
+    async def _exec():
+        try:
+            attached_id, _ = await ensure_cli_runtime_attached(
+                runtime_id=runtime_id,
+                auth_user_index=auth_user_index,
+            )
+            return await execute_code_impl(
+                code=source_code,
+                runtime_id=attached_id,
+                timeout_seconds=timeout_seconds,
+                wait_for_completion=True,
+                store_history=True,
+                max_text_lines=max_text_lines,
+                max_images=max_images,
+                stdin_inputs=list(stdin_input) if stdin_input else None,
+                env=env_map,
+                _on_input_request=None if non_interactive else _interactive_stdin_cb,
+            )
+        finally:
+            await cleanup_cli_runtime_resources()
+
+    blocks, has_error = _run_with_json(_exec(), as_json=json_output)
+    saved_paths: List[Path] = []
+    if save_images_dir is not None and isinstance(blocks, list):
+        try:
+            saved_paths = save_image_blocks(blocks, save_images_dir)
+        except Exception as exc:
+            emit_error(exc, as_json=json_output)
+
+    if json_output:
+        serialized_blocks = [
+            b.model_dump(mode="json") if hasattr(b, "model_dump") else b
+            for b in (blocks if isinstance(blocks, list) else [blocks])
+        ]
+        emit_json(
+            {
+                "has_error": bool(has_error),
+                "blocks": serialized_blocks,
+                "saved_images": [str(p) for p in saved_paths],
+            }
+        )
+    else:
+        render_execution_blocks(blocks if isinstance(blocks, list) else [], saved_paths)
+
+    if has_error:
+        raise typer.Exit(code=int(CLIExitCode.EXECUTION_ERROR))
+
+
+@app.command("execute-notebook")
+def execute_notebook(
+    notebook_path: Path = typer.Argument(..., help="Path to local .ipynb notebook file."),
+    runtime_id: Optional[str] = typer.Option(
+        None,
+        "--runtime-id",
+        "-r",
+        help="Target Colab runtime endpoint ID (defaults to active CLI session).",
+    ),
+    auth_user_index: Optional[int] = typer.Option(
+        None,
+        "--auth-user-index",
+        "-u",
+        help="Google multi-account user index override.",
+    ),
+    reset_kernel: bool = typer.Option(
+        True,
+        "--reset-kernel/--no-reset-kernel",
+        help="Restart the Jupyter kernel before executing cells.",
+    ),
+    cell_index: Optional[List[int]] = typer.Option(
+        None,
+        "--cell-index",
+        help="0-based cell index to execute (repeatable).",
+    ),
+    stop_on_error: bool = typer.Option(
+        True,
+        "--stop-on-error/--continue-on-error",
+        help="Halt execution on the first failing cell.",
+    ),
+    timeout_per_cell: int = typer.Option(
+        300,
+        "--timeout-per-cell",
+        help="Timeout per cell in seconds (5-14400).",
+    ),
+    output_save_path: Optional[str] = typer.Option(
+        None,
+        "--output-save-path",
+        help="Optional output path to serialize the executed .ipynb file.",
+    ),
+    stdin_input: Optional[List[str]] = typer.Option(
+        None,
+        "--stdin-input",
+        help="Pre-supplied input() replies consumed sequentially across cells.",
+    ),
+    env: Optional[List[str]] = typer.Option(
+        None,
+        "--env",
+        "-e",
+        help="Environment variable override in KEY=VALUE format (repeatable).",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
+) -> None:
+    """Execute a Jupyter notebook (.ipynb) cell-by-cell on the connected Colab kernel."""
+    if auth_user_index is not None:
+        _validate_user_index(auth_user_index)
+
+    from colab_mcp.notebook.runner import execute_notebook_impl
+
+    try:
+        env_map = _parse_env_pairs(env)
+    except Exception as exc:
+        emit_error(exc, as_json=json_output)
+
+    async def _exec_nb():
+        try:
+            attached_id, _ = await ensure_cli_runtime_attached(
+                runtime_id=runtime_id,
+                auth_user_index=auth_user_index,
+            )
+            return await execute_notebook_impl(
+                notebook_path=str(notebook_path),
+                reset_kernel_before_run=reset_kernel,
+                cell_indices=list(cell_index) if cell_index else None,
+                stop_on_error=stop_on_error,
+                timeout_per_cell_seconds=timeout_per_cell,
+                output_save_path=output_save_path,
+                runtime_id=attached_id,
+                stdin_inputs=list(stdin_input) if stdin_input else None,
+                env=env_map,
+            )
+        finally:
+            await cleanup_cli_runtime_resources()
+
+    resp = _run_with_json(_exec_nb(), as_json=json_output)
+    if json_output:
+        emit_json(resp.model_dump(mode="json"))
+    else:
+        render_notebook_summary(resp)
+
+    if resp.failed_cells > 0:
+        raise typer.Exit(code=int(CLIExitCode.EXECUTION_ERROR))
+
+
+@app.command("interrupt")
+def interrupt(
+    runtime_id: Optional[str] = typer.Option(
+        None,
+        "--runtime-id",
+        "-r",
+        help="Target Colab runtime endpoint ID (defaults to active CLI session).",
+    ),
+    auth_user_index: Optional[int] = typer.Option(
+        None,
+        "--auth-user-index",
+        "-u",
+        help="Google multi-account user index override.",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
+) -> None:
+    """Send SIGINT (escalating to kernel restart if hung) to the active Colab kernel."""
+    if auth_user_index is not None:
+        _validate_user_index(auth_user_index)
+
+    from colab_mcp.kernel.tools import interrupt_execution_impl
+
+    async def _interrupt():
+        try:
+            attached_id, _ = await ensure_cli_runtime_attached(
+                runtime_id=runtime_id,
+                auth_user_index=auth_user_index,
+            )
+            return await interrupt_execution_impl(runtime_id=attached_id)
+        finally:
+            await cleanup_cli_runtime_resources()
+
+    data = _run_with_json(_interrupt(), as_json=json_output)
+    if json_output:
+        emit_json(data)
+        return
+
+    render_key_values(
+        "Kernel Interrupt Result",
+        [
+            ("Runtime ID", data.get("runtime_id") or "-"),
+            ("Status", data.get("status")),
+            ("Kernel State", data.get("kernel_state")),
+            ("Kernel Restarted", data.get("kernel_restarted")),
+            ("Message", data.get("message")),
+        ],
+    )
+
+
+# ============================================================================
+# 5. VM File Transfer & Google Drive Commands
+# ============================================================================
+
+
+@app.command("list-files")
+def list_files(
+    remote_path: str = typer.Argument(
+        "/content",
+        help="Directory or file path on the Colab VM.",
+    ),
+    runtime_id: Optional[str] = typer.Option(
+        None,
+        "--runtime-id",
+        "-r",
+        help="Target Colab runtime endpoint ID (defaults to active CLI session).",
+    ),
+    auth_user_index: Optional[int] = typer.Option(
+        None,
+        "--auth-user-index",
+        "-u",
+        help="Google multi-account user index override.",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
+) -> None:
+    """List files and directories on the connected Colab VM."""
+    if auth_user_index is not None:
+        _validate_user_index(auth_user_index)
+
+    from colab_mcp.files.tools import list_files_impl
+
+    async def _ls():
+        try:
+            attached_id, _ = await ensure_cli_runtime_attached(
+                runtime_id=runtime_id,
+                auth_user_index=auth_user_index,
+            )
+            return await list_files_impl(remote_path=remote_path, runtime_id=attached_id)
+        finally:
+            await cleanup_cli_runtime_resources()
+
+    resp = _run_with_json(_ls(), as_json=json_output)
+    if json_output:
+        emit_json(resp.model_dump(mode="json"))
+        return
+    render_remote_files(resp)
+
+
+@app.command("upload-file")
+def upload_file(
+    local_path: str = typer.Argument(..., help="Local file path to upload."),
+    remote_path: str = typer.Argument(..., help="Destination path on Colab VM (e.g. /content/data.zip)."),
+    runtime_id: Optional[str] = typer.Option(
+        None,
+        "--runtime-id",
+        "-r",
+        help="Target Colab runtime endpoint ID (defaults to active CLI session).",
+    ),
+    auth_user_index: Optional[int] = typer.Option(
+        None,
+        "--auth-user-index",
+        "-u",
+        help="Google multi-account user index override.",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
+) -> None:
+    """Upload a local file to the connected Colab VM."""
+    if auth_user_index is not None:
+        _validate_user_index(auth_user_index)
+
+    from colab_mcp.files.tools import upload_file_impl
+
+    async def _up():
+        try:
+            attached_id, _ = await ensure_cli_runtime_attached(
+                runtime_id=runtime_id,
+                auth_user_index=auth_user_index,
+            )
+            return await upload_file_impl(
+                local_path=local_path,
+                remote_path=remote_path,
+                runtime_id=attached_id,
+            )
+        finally:
+            await cleanup_cli_runtime_resources()
+
+    resp = _run_with_json(_up(), as_json=json_output)
+    if json_output:
+        emit_json(resp.model_dump(mode="json"))
+        return
+
+    render_key_values(
+        "File Uploaded to Colab VM",
+        [
+            ("Runtime ID", resp.runtime_id),
+            ("Local Path", resp.local_path),
+            ("Remote Path", resp.remote_path),
+            ("Size (bytes)", resp.size_bytes),
+            ("SHA-256", resp.sha256),
+            ("Transfer Method", resp.transfer_method),
+        ],
+    )
+
+
+@app.command("download-file")
+def download_file(
+    remote_path: str = typer.Argument(..., help="Source file path on Colab VM."),
+    local_path: str = typer.Argument(..., help="Destination file path on local disk."),
+    runtime_id: Optional[str] = typer.Option(
+        None,
+        "--runtime-id",
+        "-r",
+        help="Target Colab runtime endpoint ID (defaults to active CLI session).",
+    ),
+    auth_user_index: Optional[int] = typer.Option(
+        None,
+        "--auth-user-index",
+        "-u",
+        help="Google multi-account user index override.",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
+) -> None:
+    """Download a file from the connected Colab VM to local disk."""
+    if auth_user_index is not None:
+        _validate_user_index(auth_user_index)
+
+    from colab_mcp.files.tools import download_file_impl
+
+    async def _dl():
+        try:
+            attached_id, _ = await ensure_cli_runtime_attached(
+                runtime_id=runtime_id,
+                auth_user_index=auth_user_index,
+            )
+            return await download_file_impl(
+                remote_path=remote_path,
+                local_path=local_path,
+                runtime_id=attached_id,
+            )
+        finally:
+            await cleanup_cli_runtime_resources()
+
+    resp = _run_with_json(_dl(), as_json=json_output)
+    if json_output:
+        emit_json(resp.model_dump(mode="json"))
+        return
+
+    render_key_values(
+        "File Downloaded from Colab VM",
+        [
+            ("Runtime ID", resp.runtime_id),
+            ("Remote Path", resp.remote_path),
+            ("Local Path", resp.local_path),
+            ("Size (bytes)", resp.size_bytes),
+            ("SHA-256", resp.sha256),
+            ("Transfer Method", resp.transfer_method),
+        ],
+    )
+
+
+@app.command("drive-list")
+def drive_list(
+    folder: str = typer.Option(
+        "MyDrive",
+        "--folder",
+        "-f",
+        help="Google Drive folder path or folder ID.",
+    ),
+    query: Optional[str] = typer.Option(
+        None,
+        "--query",
+        "-q",
+        help="Optional substring filter on file/folder name.",
+    ),
+    max_results: int = typer.Option(50, "--max-results", help="Maximum results (1-200)."),
+    auth_user_index: int = typer.Option(
+        0,
+        "--auth-user-index",
+        "-u",
+        help="Google multi-account user index (>= 0).",
+    ),
+    quota_project_id: Optional[str] = typer.Option(
+        None,
+        "--quota-project-id",
+        help="Optional GCP project ID for X-Goog-User-Project quota attribution.",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
+) -> None:
+    """List files and folders in Google Drive via Drive API v3."""
+    _validate_user_index(auth_user_index)
+
+    from colab_mcp.files.tools import drive_list_impl
+
+    resp = _run_with_json(
+        drive_list_impl(
+            folder=folder,
+            query=query,
+            max_results=max_results,
+            auth_user_index=auth_user_index,
+            quota_project_id=quota_project_id,
+        ),
+        as_json=json_output,
+    )
+    if json_output:
+        emit_json(resp.model_dump(mode="json"))
+        return
+    render_drive_files(resp)
+
+
+@app.command("drive-download")
+def drive_download(
+    file_id_or_path: str = typer.Argument(
+        ...,
+        help="Google Drive file ID or path (e.g. 'MyDrive/data/dataset.zip').",
+    ),
+    local_path: Optional[str] = typer.Option(
+        None,
+        "--local-path",
+        "-l",
+        help="Destination path on local disk.",
+    ),
+    runtime_path: Optional[str] = typer.Option(
+        None,
+        "--runtime-path",
+        help="Destination path directly on the connected Colab VM.",
+    ),
+    runtime_id: Optional[str] = typer.Option(
+        None,
+        "--runtime-id",
+        "-r",
+        help="Target Colab runtime endpoint ID when --runtime-path is set.",
+    ),
+    auth_user_index: int = typer.Option(
+        0,
+        "--auth-user-index",
+        "-u",
+        help="Google multi-account user index (>= 0).",
+    ),
+    quota_project_id: Optional[str] = typer.Option(
+        None,
+        "--quota-project-id",
+        help="Optional GCP quota project ID.",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
+) -> None:
+    """Download a file from Google Drive to local disk and/or the connected Colab VM."""
+    _validate_user_index(auth_user_index)
+
+    from colab_mcp.files.tools import drive_download_impl
+
+    async def _ddl():
+        try:
+            target_rt = runtime_id
+            if runtime_path is not None:
+                target_rt, _ = await ensure_cli_runtime_attached(
+                    runtime_id=runtime_id,
+                    auth_user_index=auth_user_index,
+                )
+            return await drive_download_impl(
+                file_id_or_path=file_id_or_path,
+                local_path=local_path,
+                runtime_path=runtime_path,
+                auth_user_index=auth_user_index,
+                runtime_id=target_rt,
+                quota_project_id=quota_project_id,
+            )
+        finally:
+            await cleanup_cli_runtime_resources()
+
+    resp = _run_with_json(_ddl(), as_json=json_output)
+    if json_output:
+        emit_json(resp.model_dump(mode="json"))
+        return
+
+    render_key_values(
+        "Google Drive Download Complete",
+        [
+            ("File Name", resp.file_name),
+            ("File ID", resp.file_id),
+            ("Size (bytes)", resp.size_bytes),
+            ("SHA-256", resp.sha256 or "-"),
+            ("Local Path", resp.local_path or "-"),
+            ("Runtime Path", resp.runtime_path or "-"),
+        ],
+    )
+
+
+@app.command("drive-upload")
+def drive_upload(
+    local_path: Optional[str] = typer.Option(
+        None,
+        "--local-path",
+        "-l",
+        help="Source file path on local disk.",
+    ),
+    runtime_path: Optional[str] = typer.Option(
+        None,
+        "--runtime-path",
+        help="Source file path on the connected Colab VM.",
+    ),
+    drive_folder: str = typer.Option(
+        "MyDrive",
+        "--drive-folder",
+        "-f",
+        help="Destination folder path or ID in Google Drive.",
+    ),
+    file_name: Optional[str] = typer.Option(
+        None,
+        "--file-name",
+        help="Override uploaded file name in Google Drive.",
+    ),
+    runtime_id: Optional[str] = typer.Option(
+        None,
+        "--runtime-id",
+        "-r",
+        help="Target Colab runtime endpoint ID when --runtime-path is set.",
+    ),
+    auth_user_index: int = typer.Option(
+        0,
+        "--auth-user-index",
+        "-u",
+        help="Google multi-account user index (>= 0).",
+    ),
+    quota_project_id: Optional[str] = typer.Option(
+        None,
+        "--quota-project-id",
+        help="Optional GCP quota project ID.",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
+) -> None:
+    """Upload a local or Colab VM file into Google Drive."""
+    _validate_user_index(auth_user_index)
+
+    from colab_mcp.files.tools import drive_upload_impl
+
+    async def _dup():
+        try:
+            target_rt = runtime_id
+            if runtime_path is not None:
+                target_rt, _ = await ensure_cli_runtime_attached(
+                    runtime_id=runtime_id,
+                    auth_user_index=auth_user_index,
+                )
+            return await drive_upload_impl(
+                local_path=local_path,
+                runtime_path=runtime_path,
+                drive_folder=drive_folder,
+                file_name=file_name,
+                auth_user_index=auth_user_index,
+                runtime_id=target_rt,
+                quota_project_id=quota_project_id,
+            )
+        finally:
+            await cleanup_cli_runtime_resources()
+
+    resp = _run_with_json(_dup(), as_json=json_output)
+    if json_output:
+        emit_json(resp.model_dump(mode="json"))
+        return
+
+    render_key_values(
+        "Google Drive Upload Complete",
+        [
+            ("File Name", resp.file_name),
+            ("File ID", resp.file_id),
+            ("Size (bytes)", resp.size_bytes),
+            ("SHA-256", resp.sha256 or "-"),
+            ("Drive Folder", drive_folder),
+            ("Local Source", resp.local_path or "-"),
+            ("Runtime Source", resp.runtime_path or "-"),
+        ],
+    )
 
 
 if __name__ == "__main__":

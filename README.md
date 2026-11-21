@@ -224,19 +224,69 @@ Opens a real Google Chrome window (`--remote-debugging-port=9222`) for interacti
 
 ## 💻 CLI Reference (`colab-mcp`)
 
-| Command | Example | Description |
+`colab-mcp` provides a **24-command full-parity CLI** alongside its MCP server. Commands share an encrypted OS keystore and a token-free CLI session pointer (`~/.colabmcp/cli_session.json`), support human-readable tables by default with `--json` for scripts/agents, and return typed exit codes (`10` auth, `11` quota/capacity, `12` disconnected, `13` execution error).
+
+### Quick CLI Workflow
+
+```bash
+# 1. Authenticate and connect a GPU runtime
+colab-mcp login --method oauth_remote
+colab-mcp connect-runtime --accelerator T4
+
+# 2. Run code, save Matplotlib plots, inspect GPU VRAM, execute notebooks
+colab-mcp execute-code "import torch; print(torch.cuda.get_device_name(0))"
+colab-mcp execute-code --file train.py --save-images-dir ./plots
+colab-mcp system-metrics
+colab-mcp execute-notebook experiment.ipynb --output-save-path executed.ipynb
+
+# 3. Transfer files or pull checkpoints, then disconnect to stop CCU burn
+colab-mcp download-file /content/model.pt ./model.pt
+colab-mcp disconnect
+
+# Bonus: auto-configure Claude Desktop, Cursor, Antigravity, or VS Code MCP config
+colab-mcp setup-mcp --client cursor
+```
+
+### Complete Command Catalog (24 Commands)
+
+| Category | Command | Description |
 |---|---|---|
-| `run` | `colab-mcp run --transport stdio` | Start the MCP server (`stdio` or `sse` with `--host` and `--port`). |
-| `login` | `colab-mcp login --method oauth_remote` | Authenticate a Google account and save encrypted credentials. |
-| `status` | `colab-mcp status --force-refresh` | Show authentication status, tier, CCU balance, and active runtime state. |
-| `set-secret` | `colab-mcp set-secret HF_TOKEN` | Encrypt and store a token/secret in the vault via hidden prompt or `--value`. |
-| `list-secrets` | `colab-mcp list-secrets` | List stored secret names and masked previews. |
-| `delete-secret` | `colab-mcp delete-secret HF_TOKEN` | Remove a stored secret/token from the vault. |
-| `list-runtimes` | `colab-mcp list-runtimes` | List available hardware accelerators and hourly CCU rates. |
-| `list-sessions` | `colab-mcp list-sessions` | List all active remote and locally tracked Colab sessions. |
-| `disconnect` | `colab-mcp disconnect --all` | Terminate a specific runtime (`--runtime-id`) or all sessions (`--all`). |
-| `logout` | `colab-mcp logout` | Terminate active sessions and purge stored credentials. |
-| `version` | `colab-mcp version` | Print the installed `colab-mcp` version. |
+| **Server & Setup** | `run` | Start the MCP server (`stdio` or `sse` with `--host` and `--port`). |
+| | `setup-mcp` | Auto-configure `colab-mcp` in Claude Desktop, Claude Code, Cursor, Antigravity, or VS Code (`--dry-run`, `--remove`). |
+| | `version` | Print the installed `colab-mcp` version (`--json`). |
+| **Auth & Secrets** | `login` | Authenticate a Google account (`oauth_remote`, `oauth_loopback`, `oauth_adc`, `cdp_browser`). |
+| | `status` | Show authentication status, tier, CCU balance, and active runtime state. |
+| | `logout` | Terminate active sessions and purge stored credentials. |
+| | `set-secret` | Encrypt and store a token/secret in the vault via hidden prompt or `--value`. |
+| | `list-secrets` | List stored secret names and masked previews. |
+| | `delete-secret` | Remove a stored secret/token from the vault. |
+| **Runtime & Telemetry** | `list-runtimes` | List available hardware accelerators (`NONE`..`H100`, `V5E1`, `V6E1`) and hourly CCU rates. |
+| | `list-sessions` | List all active remote and locally tracked Colab sessions. |
+| | `connect-runtime` | Provision or attach a Colab VM (`--accelerator T4`, `--high-ram`) and save the active CLI session. |
+| | `runtime-status` | Inspect active VM health, kernel execution state, and uptime. |
+| | `system-metrics` | Show live GPU VRAM/utilization, system RAM, and `/content` disk usage. |
+| | `disconnect` | Terminate the active session, a target `--runtime-id`, or all sessions (`--all`). |
+| **Code & Notebooks** | `execute-code` | Execute inline code, `--file`, or `-` (stdin); supports `--stdin-input`, `--env`, `--save-images-dir`, `--non-interactive`. |
+| | `execute-notebook` | Execute `.ipynb` notebooks cell-by-cell (`--cell-index`, `--no-reset-kernel`, `--output-save-path`). |
+| | `interrupt` | Send SIGINT (escalating to kernel restart if hung) to the active kernel. |
+| **VM Files & Drive** | `list-files` | List files and directories on the connected Colab VM (default `/content`). |
+| | `upload-file` | Upload a local file to the Colab VM with SHA-256 verification. |
+| | `download-file` | Download any file from the Colab VM to local disk (with chunked fallback). |
+| | `drive-list` | List files and folders in Google Drive via Drive API v3. |
+| | `drive-download` | Download a Google Drive file to `--local-path` and/or `--runtime-path`. |
+| | `drive-upload` | Upload from `--local-path` or `--runtime-path` directly to Google Drive. |
+
+### Exit Codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Success |
+| `1` | Unexpected error |
+| `2` | Invalid arguments / validation error |
+| `10` | Authentication required or keystore error |
+| `11` | Quota exceeded, High-RAM unavailable, or cloud capacity error |
+| `12` | Runtime disconnected / kernel unavailable |
+| `13` | Kernel execution error, timeout, or unfulfilled `input()` under `--non-interactive` |
 
 ---
 

@@ -26,6 +26,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - **VM File Transfer & Google Drive Tools (`colab_mcp.files`):**
   - Jupyter Contents API listing/upload/download with automatic 512 KB chunked kernel transfer fallback and SHA-256 checksum verification, plus Google Drive v3 API tools.
   - MCP tools: `colab_list_files`, `colab_download_file`, `colab_upload_file`, `colab_drive_list`, `colab_drive_download`, `colab_drive_upload`.
-- **Server Transports, CLI & Community Infrastructure:**
-  - MCP SDK v2 (`MCPServer`) supporting `stdio` (strict `stderr` logging isolation) and `sse` transports, global egress credential redaction, and Typer CLI (`run`, `login`, `status`, `set-secret`, `list-secrets`, `delete-secret`, `list-runtimes`, `list-sessions`, `disconnect`, `logout`, `version`).
+- **Full-Parity 24-Command CLI (`colab_mcp.cli`, `cli_session`, `cli_output`, `cli_setup`):**
+  - MCP SDK v2 (`MCPServer`) supporting `stdio` (strict `stderr` logging isolation) and `sse` transports, global egress credential redaction.
+  - Full 24-command flat Typer CLI matching all MCP capabilities (`run`, `setup-mcp`, `login`, `status`, `logout`, `set-secret`, `list-secrets`, `delete-secret`, `list-runtimes`, `list-sessions`, `connect-runtime`, `runtime-status`, `system-metrics`, `disconnect`, `execute-code`, `execute-notebook`, `interrupt`, `list-files`, `upload-file`, `download-file`, `drive-list`, `drive-download`, `drive-upload`, `version`).
+  - Token-free CLI session persistence (`~/.colabmcp/cli_session.json`) with TFE auto-reattach, human-readable Rich output + `--json` mode, semantic exit codes (`10`/`11`/`12`/`13`), `--save-images-dir` for Matplotlib plots, interactive `stdin` prompt forwarding, and `setup-mcp` host auto-configurator.
   - GitHub Actions CI matrix across Linux, Windows, and macOS (Python 3.10–3.13).
