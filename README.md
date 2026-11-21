@@ -1,13 +1,15 @@
-# Google Colab MCP Server (`colab-mcp`)
+# Google Colab CLI & MCP Server (`colab-mcp`)
 
 [![CI](https://github.com/Treamyracle/colab-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Treamyracle/colab-mcp/actions/workflows/ci.yml)
-[![MCP Version](https://img.shields.io/badge/MCP-2024--11--05-blue.svg)](https://modelcontextprotocol.io/)
+[![Release](https://img.shields.io/github/v/release/Treamyracle/colab-mcp)](https://github.com/Treamyracle/colab-mcp/releases)
+[![MCP SDK](https://img.shields.io/badge/MCP-v2-blue.svg)](https://modelcontextprotocol.io/)
 [![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/Treamyracle/colab-mcp?style=social)](https://github.com/Treamyracle/colab-mcp/stargazers)
 
-A **Model Context Protocol (MCP)** server connecting AI coding assistants (Claude Desktop, Cursor, Antigravity, Cline, Roo-Code, Windsurf) directly to **consumer Google Colab** (`colab.research.google.com`).
+A **full-parity CLI & Model Context Protocol (MCP) server** connecting your terminal and AI coding assistants (Claude Code, Claude Desktop, Cursor, Antigravity, VS Code, Windsurf) directly to **consumer Google Colab** (`colab.research.google.com`).
 
-Authenticate with your Google account, provision CPU/GPU/TPU runtimes, execute Python snippets or full `.ipynb` Jupyter notebooks, stream cell outputs and Matplotlib plots, transfer `.zip`/dataset files to and from the VM, and manage remote sessions—all without leaving your editor or agent.
+Authenticate with your Google account, provision CPU/GPU/TPU runtimes, execute Python snippets or full `.ipynb` Jupyter notebooks, handle `input()` / `userdata` / Drive seamlessly without browser popups, monitor GPU VRAM & system telemetry, transfer `.zip`/dataset files and Google Drive artifacts, and store encrypted tokens—from either the CLI or your AI agent.
 
 ---
 
@@ -99,6 +101,16 @@ playwright install chromium
 ```
 
 ### 2. Configure Your AI Agent Host
+
+Auto-configure Claude Desktop, Claude Code, Cursor, Antigravity, or VS Code in one command:
+
+```bash
+colab-mcp setup-mcp --client auto
+# Or target a specific client / preview changes first:
+colab-mcp setup-mcp --client cursor --dry-run
+```
+
+Or configure manually:
 
 #### Claude Desktop
 Add `colab` to your `claude_desktop_config.json`:
@@ -314,9 +326,13 @@ colab-mcp setup-mcp --client cursor
 
 ---
 
-## 🤝 Contributing & Development
+## 🤝 Contributing & Community
 
-Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+Contributions, bug reports, feature ideas, and pull requests are very welcome!
+
+- **Star & Fork** the repository if `colab-mcp` saves you time running GPU/TPU workloads!
+- Browse open issues (including [`good first issue`](https://github.com/Treamyracle/colab-mcp/labels/good%20first%20issue)) or start a conversation in [GitHub Discussions](https://github.com/Treamyracle/colab-mcp/discussions).
+- Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
 ```bash
 # Run offline unit, integration, and ColabTwin opaque E2E suites (no Google login required)
