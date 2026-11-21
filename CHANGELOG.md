@@ -4,6 +4,16 @@ All notable changes to `colab-mcp` are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-11-22
+
+### Added
+- **PyPI Package (`gcolab-mcp`) & Official MCP Registry (`server.json`):**
+  - Published package metadata as `gcolab-mcp` exposing both `colab-mcp` and `gcolab-mcp` CLI entrypoints.
+  - Added `server.json` (`io.github.Treamyracle/colab-mcp`), `glama.json`, and README `mcp-name` verification tag.
+  - Extended `.github/workflows/release.yml` with OIDC Trusted Publishing to PyPI and `mcp-publisher` OIDC publishing to the Official MCP Registry (`registry.modelcontextprotocol.io`).
+- **T4 CLI Demo Assets:**
+  - Added animated terminal GIF (`docs/assets/demo.gif`) and asciinema v2 cast (`docs/assets/demo.cast`) embedded in `README.md`.
+
 ## [0.1.0] - 2026-11-19
 
 ### Added

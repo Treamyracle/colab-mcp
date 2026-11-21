@@ -1,3 +1,5 @@
+<!-- mcp-name: io.github.Treamyracle/colab-mcp -->
+
 # Google Colab CLI & MCP Server (`colab-mcp`)
 
 [![CI](https://github.com/Treamyracle/colab-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Treamyracle/colab-mcp/actions/workflows/ci.yml)
@@ -92,14 +94,17 @@ For deep protocol details, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ### 1. Install
 
-Run directly from GitHub with `uvx`, or install via `pip`:
+Run via `uvx` or install via `pip` (PyPI package: [`gcolab-mcp`](https://pypi.org/project/gcolab-mcp/), exposes both `colab-mcp` and `gcolab-mcp` CLI commands):
 
 ```bash
-# Run directly with uvx (no manual clone required)
-uvx --from git+https://github.com/Treamyracle/colab-mcp.git colab-mcp run
+# Run directly from PyPI with uvx (once v0.1.1+ is published)
+uvx gcolab-mcp run
 
-# Or install from GitHub via pip
-pip install git+https://github.com/Treamyracle/colab-mcp.git
+# Or install from PyPI via pip
+pip install gcolab-mcp
+
+# Or run directly from GitHub with uvx (no clone required)
+uvx --from git+https://github.com/Treamyracle/colab-mcp.git colab-mcp run
 
 # Or install editable for local development (with browser CDP + test dependencies)
 git clone https://github.com/Treamyracle/colab-mcp.git

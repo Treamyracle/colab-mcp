@@ -5,13 +5,12 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
-
 jobs:
-  release:
-    name: Build & Publish GitHub Release
+  build-and-release:
+    name: Build, Test & GitHub Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Check out repository
@@ -34,9 +33,69 @@ jobs:
       - name: Build sdist and wheel
         run: python -m build
 
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-packages
+          path: dist/
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          files: |
+            dist/*
+            server.json
           generate_release_notes: true
           name: "colab-mcp ${{ github.ref_name }}"
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build-and-release
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/gcolab-mcp
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-packages
+          path: dist/
+
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-mcp-registry:
+    name: Publish to Official MCP Registry
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install mcp-publisher CLI
+        run: |
+          set -euo pipefail
+          os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+          arch="$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_${os}_${arch}.tar.gz" | tar -xz mcp-publisher
+
+      - name: Validate server.json version matches git tag
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          json_version="$(python3 -c "import json; print(json.load(open('server.json'))['version'])")"
+          pkg_version="$(python3 -c "import json; print(json.load(open('server.json'))['packages'][0]['version'])")"
+          test "$tag_version" = "$json_version"
+          test "$tag_version" = "$pkg_version"
+
+      - name: Login & publish to Official MCP Registry
+        run: |
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish

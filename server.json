@@ -1,0 +1,28 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Treamyracle/colab-mcp",
+  "title": "Google Colab MCP & CLI",
+  "description": "Google Colab CLI & MCP server for GPU/TPU runtimes, interactive execution, secrets, and Drive.",
+  "repository": {
+    "url": "https://github.com/Treamyracle/colab-mcp",
+    "source": "github"
+  },
+  "version": "0.1.1",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "gcolab-mcp",
+      "version": "0.1.1",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "run"
+        }
+      ]
+    }
+  ]
+}
