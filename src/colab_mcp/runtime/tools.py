@@ -675,7 +675,7 @@ def register_runtime_tools(mcp: MCPServer) -> None:
     @mcp.tool(
         name="colab_list_runtime_types",
         description=(
-            "Query available Google Colab hardware accelerators (CPU, T4, L4, A100, H100 GPUs, "
+            "Query available Google Colab hardware accelerators (CPU, T4, L4, G4, A100, H100 GPUs, "
             "TPU v5e/v6e), high-RAM configurations, availability, and hourly CCU burn rates."
         ),
     )

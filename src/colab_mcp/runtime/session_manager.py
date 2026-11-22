@@ -511,14 +511,14 @@ class SessionManager:
 
         raise RuntimeDisconnectedError("Failed to discover or initialize Jupyter kernel.")
 
-    async def get_kernel_connection_params(
+    async def get_runtime_proxy_params(
         self, runtime_id: Optional[str] = None
-    ) -> KernelConnectionParams:
+    ) -> tuple[str, str, str, datetime]:
         """
-        Retrieve active VM tunnel parameters and kernel binding (TECH_SPEC §2.4 Contract 2).
+        Retrieve fresh runtime tunnel ``(endpoint, proxy_url, proxy_token, expires_at)``.
 
-        Refreshes short-lived proxy tokens via GET /tun/m/assignments when near expiry.
-        Raises RuntimeDisconnectedError if no matching VM session is active.
+        Refreshes expiring proxy tokens via ``GET /tun/m/assignments`` without probing
+        or initializing a Jupyter kernel, allowing SSH and browser-URL attachment cleanly.
         """
         record = self.get_session(runtime_id)
         if record is None or record.assignment is None:
@@ -584,11 +584,36 @@ class SessionManager:
                     f"Runtime '{record.endpoint}' is missing proxy connection credentials."
                 )
 
+            expires_at = datetime.fromtimestamp(
+                record.token_acquired_at + ttl,
+                tz=timezone.utc,
+            )
+            return record.endpoint, assignment.runtime_proxy_url, assignment.runtime_proxy_token, expires_at
+
+    async def get_kernel_connection_params(
+        self, runtime_id: Optional[str] = None
+    ) -> KernelConnectionParams:
+        """
+        Retrieve active VM tunnel parameters and kernel binding (TECH_SPEC §2.4 Contract 2).
+
+        Refreshes short-lived proxy tokens via GET /tun/m/assignments when near expiry.
+        Raises RuntimeDisconnectedError if no matching VM session is active.
+        """
+        endpoint, proxy_url, proxy_token, expires_at = await self.get_runtime_proxy_params(
+            runtime_id=runtime_id
+        )
+        async with self._get_endpoint_lock(endpoint):
+            record = self._sessions.get(endpoint)
+            if record is None:
+                raise RuntimeDisconnectedError(
+                    f"Runtime '{runtime_id or endpoint}' is disconnected or not found."
+                )
+
             if not record.kernel_id:
                 try:
                     record.kernel_id = await self._discover_or_create_kernel(
-                        proxy_url=assignment.runtime_proxy_url,
-                        proxy_token=assignment.runtime_proxy_token,
+                        proxy_url=proxy_url,
+                        proxy_token=proxy_token,
                     )
                 except RuntimeDisconnectedError:
                     raise
@@ -597,14 +622,10 @@ class SessionManager:
                         f"Unable to reach kernel API for runtime '{record.endpoint}': {exc}"
                     ) from exc
 
-            expires_at = datetime.fromtimestamp(
-                record.token_acquired_at + ttl,
-                tz=timezone.utc,
-            )
             return KernelConnectionParams(
                 endpoint=record.endpoint,
-                proxy_url=assignment.runtime_proxy_url,
-                proxy_token=assignment.runtime_proxy_token,
+                proxy_url=proxy_url,
+                proxy_token=proxy_token,
                 token_expires_at=expires_at,
                 kernel_id=record.kernel_id,
                 client_agent="colab-mcp",

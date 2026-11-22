@@ -3,6 +3,7 @@ Colab VM file transfer and Google Drive integration tools.
 """
 
 from colab_mcp.files.models import (
+    DeleteFileResponse,
     DownloadFileResponse,
     DriveFileEntry,
     DriveListResponse,
@@ -12,6 +13,7 @@ from colab_mcp.files.models import (
     UploadFileResponse,
 )
 from colab_mcp.files.tools import (
+    delete_file_impl,
     download_file_impl,
     drive_download_impl,
     drive_list_impl,
@@ -22,6 +24,7 @@ from colab_mcp.files.tools import (
 )
 
 __all__ = [
+    "DeleteFileResponse",
     "DownloadFileResponse",
     "DriveFileEntry",
     "DriveListResponse",
@@ -29,6 +32,7 @@ __all__ = [
     "ListFilesResponse",
     "RemoteFileEntry",
     "UploadFileResponse",
+    "delete_file_impl",
     "download_file_impl",
     "drive_download_impl",
     "drive_list_impl",

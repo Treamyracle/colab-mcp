@@ -41,6 +41,7 @@ from colab_mcp.runtime.models import KernelConnectionParams
 from colab_mcp.runtime.session_manager import get_session_manager
 from colab_mcp.utils.logging import get_logger
 from colab_mcp.utils.redaction import redact_credentials
+from colab_mcp.utils.ws import select_ws_headers_param
 
 logger = get_logger(__name__)
 
@@ -69,32 +70,8 @@ def _build_ws_url(
 
 
 def _select_ws_headers_param() -> str:
-    """
-    Determine whether the active ``websockets.connect`` expects
-    ``additional_headers`` (v13+/v16+) or ``extra_headers`` (<v13).
-    Falls back to ``websockets.asyncio.client.connect`` when mocked with AsyncMock.
-    """
-    try:
-        params = inspect.signature(websockets.connect).parameters
-        if "additional_headers" in params:
-            return "additional_headers"
-        if "extra_headers" in params:
-            return "extra_headers"
-    except (TypeError, ValueError):
-        pass
-
-    try:
-        import websockets.asyncio.client as ws_asyncio_client  # type: ignore[import-untyped]
-
-        async_params = inspect.signature(ws_asyncio_client.connect).parameters
-        if "additional_headers" in async_params:
-            return "additional_headers"
-        if "extra_headers" in async_params:
-            return "extra_headers"
-    except Exception:
-        pass
-
-    return "additional_headers"
+    """Delegate to shared WebSocket header parameter detection helper."""
+    return select_ws_headers_param(websockets.connect)
 
 
 async def discover_or_create_kernel(

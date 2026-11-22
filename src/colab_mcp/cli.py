@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import sys
+import webbrowser
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import typer
+
+from colab_mcp.cli_job import (
+    build_job_payload,
+    build_runtime_browser_url,
+    extract_job_result,
+)
 
 from colab_mcp.cli_output import (
     CLIExitCode,
@@ -87,6 +95,68 @@ def _run_with_json(fn_coro: Any, *, as_json: bool) -> Any:
         raise
     except Exception as exc:
         emit_error(exc, as_json=as_json)
+
+
+def _make_cli_stdin_callback() -> Callable[[str, bool, Dict[str, Any]], Any]:
+    """Return an async interactive stdin prompt callback with ``$SECRET:`` interpolation."""
+    from colab_mcp.auth.secrets import resolve_secret_interpolation
+
+    async def _interactive_stdin_cb(
+        prompt: str,
+        password: bool,
+        _header: Dict[str, Any],
+    ) -> Optional[str]:
+        def _ask() -> str:
+            ensure_cli_stdout()
+            label = prompt.rstrip() or ("Secret input" if password else "Input")
+            raw_val = typer.prompt(label, hide_input=password)
+            return resolve_secret_interpolation(str(raw_val))
+
+        return await asyncio.to_thread(_ask)
+
+    return _interactive_stdin_cb
+
+
+def _emit_execution_response(
+    blocks: Any,
+    has_error: bool,
+    *,
+    save_images_dir: Optional[Path],
+    json_output: bool,
+    exit_code_override: Optional[int] = None,
+) -> None:
+    """Save optional plot images, render execution blocks or JSON, and apply exit code."""
+    saved_paths: List[Path] = []
+    if save_images_dir is not None and isinstance(blocks, list):
+        try:
+            saved_paths = save_image_blocks(blocks, save_images_dir)
+        except Exception as exc:
+            emit_error(exc, as_json=json_output)
+
+    code_to_exit = (
+        exit_code_override
+        if exit_code_override is not None
+        else (int(CLIExitCode.EXECUTION_ERROR) if has_error else 0)
+    )
+
+    if json_output:
+        serialized_blocks = [
+            b.model_dump(mode="json") if hasattr(b, "model_dump") else b
+            for b in (blocks if isinstance(blocks, list) else [blocks])
+        ]
+        payload: Dict[str, Any] = {
+            "has_error": bool(has_error),
+            "blocks": serialized_blocks,
+            "saved_images": [str(p) for p in saved_paths],
+        }
+        if exit_code_override is not None:
+            payload["exit_code"] = code_to_exit
+        emit_json(payload)
+    else:
+        render_execution_blocks(blocks if isinstance(blocks, list) else [], saved_paths)
+
+    if code_to_exit != 0:
+        raise typer.Exit(code=code_to_exit)
 
 
 # ============================================================================
@@ -589,7 +659,7 @@ def connect_runtime(
         "NONE",
         "--accelerator",
         "-a",
-        help="Hardware accelerator: NONE, T4, L4, A100, H100, V5E1, V6E1.",
+        help="Hardware accelerator: NONE, T4, L4, G4, A100, H100, V5E1, V6E1.",
     ),
     high_ram: bool = typer.Option(
         False,
@@ -708,6 +778,65 @@ def runtime_status(
             ("High RAM", (resp.metrics or {}).get("high_ram", "-")),
         ],
     )
+
+
+@app.command("runtime-url")
+def runtime_url(
+    runtime_id: Optional[str] = typer.Option(
+        None,
+        "--runtime-id",
+        "-r",
+        help="Target Colab runtime endpoint ID (defaults to active CLI session).",
+    ),
+    auth_user_index: Optional[int] = typer.Option(
+        None,
+        "--auth-user-index",
+        "-u",
+        help="Google multi-account user index override.",
+    ),
+    host: str = typer.Option(
+        "https://colab.research.google.com",
+        "--host",
+        help="Colab web UI host origin.",
+    ),
+    open_browser: bool = typer.Option(
+        False,
+        "--open",
+        help="Open the generated attach URL in the default web browser.",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
+) -> None:
+    """Print (or open) a Colab browser URL attached to an active CLI/MCP runtime."""
+    if auth_user_index is not None:
+        _validate_user_index(auth_user_index)
+
+    from colab_mcp.runtime.session_manager import get_session_manager
+
+    async def _resolve_url() -> Dict[str, str]:
+        try:
+            attached_id, _ = await ensure_cli_runtime_attached(
+                runtime_id=runtime_id,
+                auth_user_index=auth_user_index,
+            )
+            ep, _, _, _ = await get_session_manager().get_runtime_proxy_params(
+                runtime_id=attached_id
+            )
+            return {
+                "runtime_id": ep,
+                "url": build_runtime_browser_url(ep, host=host),
+            }
+        finally:
+            await cleanup_cli_runtime_resources()
+
+    data = _run_with_json(_resolve_url(), as_json=json_output)
+    ensure_cli_stdout()
+    if json_output:
+        emit_json(data)
+    else:
+        typer.echo(data["url"])
+
+    if open_browser:
+        webbrowser.open(data["url"])
 
 
 @app.command("system-metrics")
@@ -878,7 +1007,6 @@ def execute_code(
     if auth_user_index is not None:
         _validate_user_index(auth_user_index)
 
-    from colab_mcp.auth.secrets import resolve_secret_interpolation
     from colab_mcp.kernel.tools import execute_code_impl
 
     try:
@@ -887,18 +1015,7 @@ def execute_code(
     except Exception as exc:
         emit_error(exc, as_json=json_output)
 
-    async def _interactive_stdin_cb(
-        prompt: str,
-        password: bool,
-        _header: Dict[str, Any],
-    ) -> Optional[str]:
-        def _ask() -> str:
-            ensure_cli_stdout()
-            label = prompt.rstrip() or ("Secret input" if password else "Input")
-            raw_val = typer.prompt(label, hide_input=password)
-            return resolve_secret_interpolation(str(raw_val))
-
-        return await asyncio.to_thread(_ask)
+    stdin_cb = None if non_interactive else _make_cli_stdin_callback()
 
     async def _exec():
         try:
@@ -916,36 +1033,182 @@ def execute_code(
                 max_images=max_images,
                 stdin_inputs=list(stdin_input) if stdin_input else None,
                 env=env_map,
-                _on_input_request=None if non_interactive else _interactive_stdin_cb,
+                _on_input_request=stdin_cb,
             )
         finally:
             await cleanup_cli_runtime_resources()
 
     blocks, has_error = _run_with_json(_exec(), as_json=json_output)
-    saved_paths: List[Path] = []
-    if save_images_dir is not None and isinstance(blocks, list):
+    _emit_execution_response(
+        blocks,
+        has_error,
+        save_images_dir=save_images_dir,
+        json_output=json_output,
+    )
+
+
+@app.command("job", context_settings={"allow_interspersed_args": False})
+def job(
+    script: Path = typer.Argument(..., help="Local Python script to run on a fresh Colab VM."),
+    script_args: Optional[List[str]] = typer.Argument(
+        None,
+        metavar="[ARGS...]",
+        help="Arguments forwarded to SCRIPT as sys.argv[1:].",
+    ),
+    accelerator: str = typer.Option(
+        "NONE",
+        "--accelerator",
+        "-a",
+        help="Hardware accelerator: NONE, T4, L4, G4, A100, H100, V5E1, V6E1.",
+    ),
+    high_ram: bool = typer.Option(
+        False,
+        "--high-ram",
+        help="Request High-RAM VM shape (Pro/Pro+ only).",
+    ),
+    auth_user_index: int = typer.Option(
+        0,
+        "--auth-user-index",
+        "-u",
+        help="Google multi-account user index (>= 0).",
+    ),
+    connect_timeout: int = typer.Option(
+        120,
+        "--connect-timeout",
+        help="VM provisioning timeout in seconds (30-300).",
+    ),
+    timeout_seconds: int = typer.Option(
+        300,
+        "--timeout-seconds",
+        "--timeout",
+        help="Script execution timeout in seconds (5-3600).",
+    ),
+    stdin_input: Optional[List[str]] = typer.Option(
+        None,
+        "--stdin-input",
+        help="Pre-supplied input() reply (repeatable; supports '$SECRET:<NAME>').",
+    ),
+    env: Optional[List[str]] = typer.Option(
+        None,
+        "--env",
+        "-e",
+        help="Environment variable override in KEY=VALUE format (repeatable).",
+    ),
+    save_images_dir: Optional[Path] = typer.Option(
+        None,
+        "--save-images-dir",
+        help="Directory to write Matplotlib/display images as PNG/JPEG files.",
+    ),
+    non_interactive: bool = typer.Option(
+        False,
+        "--non-interactive",
+        help="Fail immediately (exit 13) if script prompts via input()/getpass() without --stdin-input.",
+    ),
+    max_text_lines: int = typer.Option(1000, "--max-text-lines", help="Max output text lines."),
+    max_images: int = typer.Option(5, "--max-images", help="Max plot images to collect."),
+    keep: bool = typer.Option(
+        False,
+        "--keep",
+        help="Keep the provisioned Colab VM alive after script completion.",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
+) -> None:
+    """Provision an ephemeral Colab VM, execute SCRIPT [ARGS...], and auto-disconnect."""
+    _validate_user_index(auth_user_index)
+
+    if not script.is_file():
+        emit_error(FileNotFoundError(f"Python script not found: '{script}'."), as_json=json_output)
+
+    from colab_mcp.kernel.tools import execute_code_impl
+    from colab_mcp.runtime.tools import connect_runtime_impl, disconnect_runtime_impl
+
+    try:
+        env_map = _parse_env_pairs(env)
+        source_payload = build_job_payload(script, script_args or [])
+    except Exception as exc:
+        emit_error(exc, as_json=json_output)
+
+    stdin_cb = None if non_interactive else _make_cli_stdin_callback()
+
+    async def _run_job() -> tuple[List[Any], int, bool]:
+        provisioned_id: Optional[str] = None
         try:
-            saved_paths = save_image_blocks(blocks, save_images_dir)
-        except Exception as exc:
-            emit_error(exc, as_json=json_output)
+            if not json_output:
+                typer.echo(
+                    f"[colab-mcp] Provisioning ephemeral {accelerator.upper()} runtime...",
+                    err=True,
+                )
+            conn = await connect_runtime_impl(
+                accelerator=accelerator,
+                high_ram=high_ram,
+                reuse_existing=False,
+                auth_user_index=auth_user_index,
+                timeout_seconds=connect_timeout,
+            )
+            provisioned_id = conn.runtime_id
+            if not json_output:
+                typer.echo(
+                    f"[colab-mcp] Executing '{script.name}' on {provisioned_id}...",
+                    err=True,
+                )
+            blocks, has_error = await execute_code_impl(
+                code=source_payload,
+                runtime_id=provisioned_id,
+                timeout_seconds=timeout_seconds,
+                wait_for_completion=True,
+                store_history=False,
+                max_text_lines=max_text_lines,
+                max_images=max_images,
+                stdin_inputs=list(stdin_input) if stdin_input else None,
+                env=env_map,
+                _on_input_request=stdin_cb,
+            )
+            cleaned_blocks, exit_code = extract_job_result(
+                blocks if isinstance(blocks, list) else [],
+                has_error=has_error,
+            )
+            if keep:
+                save_cli_session(
+                    CLISessionState(
+                        runtime_id=conn.runtime_id,
+                        kernel_id=conn.kernel_id,
+                        accelerator=conn.accelerator,
+                        variant=conn.variant,
+                        high_ram=conn.high_ram,
+                        auth_user_index=auth_user_index,
+                    )
+                )
+            return cleaned_blocks, exit_code, has_error
+        finally:
+            if provisioned_id is not None and not keep:
+                if not json_output:
+                    typer.echo(
+                        f"[colab-mcp] Releasing ephemeral runtime {provisioned_id}...",
+                        err=True,
+                    )
+                try:
+                    await disconnect_runtime_impl(
+                        runtime_id=provisioned_id,
+                        disconnect_all=False,
+                        auth_user_index=auth_user_index,
+                    )
+                except Exception as teardown_exc:
+                    typer.echo(
+                        f"[colab-mcp] Warning: failed to release '{provisioned_id}': "
+                        f"{redact_credentials(str(teardown_exc))}",
+                        err=True,
+                    )
+                clear_cli_session(runtime_id=provisioned_id)
+            await cleanup_cli_runtime_resources()
 
-    if json_output:
-        serialized_blocks = [
-            b.model_dump(mode="json") if hasattr(b, "model_dump") else b
-            for b in (blocks if isinstance(blocks, list) else [blocks])
-        ]
-        emit_json(
-            {
-                "has_error": bool(has_error),
-                "blocks": serialized_blocks,
-                "saved_images": [str(p) for p in saved_paths],
-            }
-        )
-    else:
-        render_execution_blocks(blocks if isinstance(blocks, list) else [], saved_paths)
-
-    if has_error:
-        raise typer.Exit(code=int(CLIExitCode.EXECUTION_ERROR))
+    cleaned_blocks, exit_code, has_error = _run_with_json(_run_job(), as_json=json_output)
+    _emit_execution_response(
+        cleaned_blocks,
+        has_error=(exit_code != 0) or has_error,
+        save_images_dir=save_images_dir,
+        json_output=json_output,
+        exit_code_override=exit_code,
+    )
 
 
 @app.command("execute-notebook")
@@ -1251,6 +1514,64 @@ def download_file(
     )
 
 
+@app.command("delete-file")
+def delete_file(
+    remote_path: str = typer.Argument(..., help="Remote file or directory path on Colab VM."),
+    recursive: bool = typer.Option(
+        False,
+        "--recursive",
+        help="Recursively remove non-empty directories.",
+    ),
+    runtime_id: Optional[str] = typer.Option(
+        None,
+        "--runtime-id",
+        "-r",
+        help="Target Colab runtime endpoint ID (defaults to active CLI session).",
+    ),
+    auth_user_index: Optional[int] = typer.Option(
+        None,
+        "--auth-user-index",
+        "-u",
+        help="Google multi-account user index override.",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
+) -> None:
+    """Delete a file or directory on the connected Colab VM."""
+    if auth_user_index is not None:
+        _validate_user_index(auth_user_index)
+
+    from colab_mcp.files.tools import delete_file_impl
+
+    async def _rm():
+        try:
+            attached_id, _ = await ensure_cli_runtime_attached(
+                runtime_id=runtime_id,
+                auth_user_index=auth_user_index,
+            )
+            return await delete_file_impl(
+                remote_path=remote_path,
+                recursive=recursive,
+                runtime_id=attached_id,
+            )
+        finally:
+            await cleanup_cli_runtime_resources()
+
+    resp = _run_with_json(_rm(), as_json=json_output)
+    if json_output:
+        emit_json(resp.model_dump(mode="json"))
+        return
+
+    render_key_values(
+        "Deleted Remote File",
+        [
+            ("Runtime ID", resp.runtime_id),
+            ("Remote Path", resp.remote_path),
+            ("Recursive", resp.recursive),
+            ("Method", resp.delete_method),
+        ],
+    )
+
+
 @app.command("drive-list")
 def drive_list(
     folder: str = typer.Option(
@@ -1463,6 +1784,334 @@ def drive_upload(
             ("Runtime Source", resp.runtime_path or "-"),
         ],
     )
+
+
+# ============================================================================
+# 6. Remote SSH Access Command
+# ============================================================================
+
+
+async def _disconnect_ssh_runtime(runtime_id: str, auth_user_index: int) -> None:
+    """Best-effort VM teardown on SSH exit for ephemeral ``--rm`` sessions."""
+    from colab_mcp.runtime.tools import disconnect_runtime_impl
+
+    try:
+        await disconnect_runtime_impl(
+            runtime_id=runtime_id,
+            disconnect_all=False,
+            auth_user_index=auth_user_index,
+        )
+    except Exception as exc:
+        typer.echo(
+            f"[colab-mcp] Warning: failed to stop runtime '{runtime_id}': "
+            f"{redact_credentials(str(exc))}",
+            err=True,
+        )
+    finally:
+        clear_cli_session(runtime_id=runtime_id)
+        await cleanup_cli_runtime_resources()
+
+
+async def _prepare_ssh_runtime(
+    *,
+    runtime_id: Optional[str],
+    auth_user_index: Optional[int],
+    accelerator: Optional[str],
+    high_ram: bool,
+    allow_create: bool,
+) -> tuple[str, int, bool]:
+    """Attach to an active runtime or auto-create one when allowed."""
+    from colab_mcp.runtime.models import RuntimeDisconnectedError
+    from colab_mcp.runtime.tools import connect_runtime_impl
+
+    try:
+        attached_id, effective_user = await ensure_cli_runtime_attached(
+            runtime_id=runtime_id,
+            auth_user_index=auth_user_index,
+        )
+        return attached_id, effective_user, False
+    except RuntimeDisconnectedError:
+        if not allow_create or runtime_id is not None:
+            raise
+
+    effective_user = auth_user_index if auth_user_index is not None else 0
+    requested_acc = accelerator or "NONE"
+    typer.echo(
+        f"[colab-mcp] Creating {requested_acc.upper()} runtime for SSH session...",
+        err=True,
+    )
+    conn = await connect_runtime_impl(
+        accelerator=requested_acc,
+        high_ram=high_ram,
+        reuse_existing=True,
+        auth_user_index=effective_user,
+        timeout_seconds=120,
+    )
+    save_cli_session(
+        CLISessionState(
+            runtime_id=conn.runtime_id,
+            kernel_id=conn.kernel_id,
+            accelerator=conn.accelerator,
+            variant=conn.variant,
+            high_ram=conn.high_ram,
+            auth_user_index=effective_user,
+        )
+    )
+    return conn.runtime_id, effective_user, True
+
+
+async def _kill_stale_sshd(runtime_id: str) -> None:
+    """Terminate stale SSH session processes on the Colab VM via Jupyter kernel."""
+    from colab_mcp.kernel.tools import execute_code_impl
+
+    typer.echo("[colab-mcp] --force: clearing stale SSH sessions on runtime...", err=True)
+    try:
+        await execute_code_impl(
+            code="import os; os.system('pkill -P $(pgrep -o -x sshd) 2>/dev/null || true')",
+            runtime_id=runtime_id,
+            timeout_seconds=15,
+            wait_for_completion=True,
+            store_history=False,
+        )
+    except Exception as exc:
+        typer.echo(
+            f"[colab-mcp] Warning: --force cleanup failed: {redact_credentials(str(exc))}",
+            err=True,
+        )
+
+
+@app.command("ssh", context_settings={"allow_interspersed_args": False})
+def ssh(
+    cmd: Optional[List[str]] = typer.Argument(
+        None,
+        metavar="[-- CMD [ARGS...]]",
+        help="Optional remote command to execute in /content without launching an interactive shell.",
+    ),
+    runtime_id: Optional[str] = typer.Option(
+        None,
+        "--runtime-id",
+        "-r",
+        help="Target Colab runtime endpoint ID (defaults to active CLI session).",
+    ),
+    identity: Optional[str] = typer.Option(
+        None,
+        "--identity",
+        "-i",
+        help="SSH public (.pub) or private key path (defaults to ~/.ssh/id_ed25519.pub or id_ecdsa.pub).",
+    ),
+    accelerator: Optional[str] = typer.Option(
+        None,
+        "--accelerator",
+        "-a",
+        help="Accelerator if auto-creating a runtime: NONE, T4, L4, G4, A100, H100, V5E1, V6E1.",
+    ),
+    high_ram: bool = typer.Option(
+        False,
+        "--high-ram",
+        help="Request High-RAM VM shape when auto-creating a runtime.",
+    ),
+    auth_user_index: Optional[int] = typer.Option(
+        None,
+        "--auth-user-index",
+        "-u",
+        help="Google multi-account user index override.",
+    ),
+    proxy_mode: bool = typer.Option(
+        False,
+        "--proxy-mode",
+        help="Run as an OpenSSH ProxyCommand WebSocket-to-stdio bridge.",
+    ),
+    ssh_mode: str = typer.Option(
+        "proxy",
+        "--ssh-mode",
+        hidden=True,
+        help="Internal SSH client agent mode tag.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Terminate stale VM sshd child sessions before connecting (useful on HTTP 429).",
+    ),
+    rm: bool = typer.Option(
+        False,
+        "--rm",
+        help="Disconnect an auto-created runtime (or bridged --proxy-mode runtime) on exit.",
+    ),
+    ssh_config: bool = typer.Option(
+        False,
+        "--ssh-config",
+        help="Print a ready-to-paste ~/.ssh/config entry for VS Code / Cursor Remote-SSH and exit.",
+    ),
+) -> None:
+    """Connect to a Colab VM over WebSocket SSH (interactive shell, ProxyCommand, or -- CMD)."""
+    if auth_user_index is not None:
+        _validate_user_index(auth_user_index)
+
+    from colab_mcp.runtime.session_manager import get_session_manager
+    from colab_mcp.runtime.ssh import (
+        bridge_ws_stdio,
+        build_proxy_command,
+        build_ssh_subprocess_args,
+        connect_ssh_websocket,
+        install_rm_signal_handlers,
+        render_ssh_config_snippet,
+        resolve_ssh_pubkey,
+    )
+
+    if ssh_config:
+        ensure_cli_stdout()
+        typer.echo(
+            render_ssh_config_snippet(
+                runtime_id=runtime_id,
+                identity=identity,
+                accelerator=accelerator or "T4",
+                rm=rm,
+            )
+        )
+        return
+
+    if proxy_mode and cmd:
+        emit_error(
+            ValueError("--proxy-mode cannot be combined with positional CMD arguments."),
+            as_json=False,
+        )
+
+    try:
+        pubkey = resolve_ssh_pubkey(identity)
+    except Exception as exc:
+        emit_error(exc, as_json=False)
+
+    if proxy_mode:
+        target_info: Dict[str, Any] = {"endpoint": None, "user": auth_user_index or 0}
+        restore_signals = install_rm_signal_handlers(lambda: None) if rm else None
+
+        async def _bridge() -> int:
+            try:
+                ep, eff_user, created = await _prepare_ssh_runtime(
+                    runtime_id=runtime_id,
+                    auth_user_index=auth_user_index,
+                    accelerator=accelerator,
+                    high_ram=high_ram,
+                    allow_create=(ssh_mode != "cmd"),
+                )
+                target_info["endpoint"] = ep
+                target_info["user"] = eff_user
+                if (accelerator or high_ram) and not created:
+                    typer.echo(
+                        "[colab-mcp] --accelerator/--high-ram ignored: reusing existing runtime.",
+                        err=True,
+                    )
+                if force:
+                    await _kill_stale_sshd(ep)
+                _, proxy_url, proxy_token, _ = await get_session_manager().get_runtime_proxy_params(
+                    runtime_id=ep
+                )
+                ws = await connect_ssh_websocket(
+                    proxy_url=proxy_url,
+                    proxy_token=proxy_token,
+                    pubkey=pubkey,
+                    mode=ssh_mode,
+                )
+                return await bridge_ws_stdio(ws)
+            finally:
+                await cleanup_cli_runtime_resources()
+
+        rc = 0
+        try:
+            rc = _run_with_json(_bridge(), as_json=False)
+        finally:
+            if restore_signals is not None:
+                restore_signals()
+            ep_to_stop = target_info.get("endpoint")
+            if rm and ep_to_stop:
+                try:
+                    asyncio.run(
+                        _disconnect_ssh_runtime(ep_to_stop, int(target_info.get("user", 0)))
+                    )
+                except Exception:
+                    pass
+        raise typer.Exit(code=int(rc))
+
+    # Interactive SSH shell or one-shot `-- CMD`
+    is_cmd_mode = bool(cmd)
+    from colab_mcp.runtime.ssh import ColabSSHError
+    import shutil as _shutil
+
+    if not _shutil.which("ssh"):
+        emit_error(
+            ColabSSHError(
+                "OpenSSH client (`ssh`) was not found on PATH. Install OpenSSH or use `--proxy-mode`."
+            ),
+            as_json=False,
+        )
+
+    async def _prep() -> tuple[str, int, bool]:
+        try:
+            return await _prepare_ssh_runtime(
+                runtime_id=runtime_id,
+                auth_user_index=auth_user_index,
+                accelerator=accelerator,
+                high_ram=high_ram,
+                allow_create=not is_cmd_mode,
+            )
+        finally:
+            await cleanup_cli_runtime_resources()
+
+    ep, eff_user, created_here = _run_with_json(_prep(), as_json=False)
+
+    if (accelerator or high_ram) and not created_here:
+        typer.echo(
+            "[colab-mcp] --accelerator/--high-ram ignored: reusing existing runtime.",
+            err=True,
+        )
+    if rm and (is_cmd_mode or not created_here):
+        typer.echo(
+            "[colab-mcp] --rm ignored: only runtimes auto-created by `colab-mcp ssh` are removed on exit.",
+            err=True,
+        )
+
+    effective_mode = "cmd" if is_cmd_mode else "interactive"
+    proxy_cmd = build_proxy_command(
+        runtime_id=ep,
+        identity=identity,
+        auth_user_index=eff_user,
+        mode=effective_mode,
+        rm=False,
+    )
+    force_tty = (sys.stdin.isatty() and sys.stdout.isatty()) if is_cmd_mode else True
+    try:
+        ssh_args = build_ssh_subprocess_args(
+            proxy_cmd,
+            identity=identity,
+            remote_command=cmd if is_cmd_mode else None,
+            force_tty=force_tty,
+        )
+    except Exception as exc:
+        emit_error(exc, as_json=False)
+
+    ensure_cli_stdout()
+    try:
+        if force:
+            _run_with_json(_kill_stale_sshd_standalone(ep, eff_user), as_json=False)
+        rc = subprocess.call(ssh_args)
+    finally:
+        if created_here and rm and not is_cmd_mode:
+            try:
+                asyncio.run(_disconnect_ssh_runtime(ep, eff_user))
+            except Exception:
+                pass
+    raise typer.Exit(code=int(rc))
+
+
+async def _kill_stale_sshd_standalone(runtime_id: str, auth_user_index: int) -> None:
+    try:
+        await ensure_cli_runtime_attached(
+            runtime_id=runtime_id,
+            auth_user_index=auth_user_index,
+        )
+        await _kill_stale_sshd(runtime_id)
+    finally:
+        await cleanup_cli_runtime_resources()
 
 
 if __name__ == "__main__":

@@ -56,6 +56,7 @@ ALL_EXPECTED_MCP_TOOLS = [
     "colab_list_files",
     "colab_download_file",
     "colab_upload_file",
+    "colab_delete_file",
     "colab_drive_list",
     "colab_drive_download",
     "colab_drive_upload",

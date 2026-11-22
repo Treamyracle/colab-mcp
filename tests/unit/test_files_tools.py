@@ -13,6 +13,7 @@ import httpx
 import pytest
 
 from colab_mcp.files.tools import (
+    delete_file_impl,
     download_file_impl,
     drive_download_impl,
     drive_list_impl,
@@ -210,3 +211,62 @@ async def test_drive_list_upload_download_and_quota_error(tmp_path: Path, monkey
 
     with pytest.raises(ValueError, match="quota project"):
         await drive_list_impl(folder="MyDrive", quota_project_id="missing-proj-test")
+
+
+@pytest.mark.asyncio
+async def test_delete_file_impl_contents_api_and_recursive_fallback(monkeypatch):
+    deleted_rels = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        rel = request.url.path[len("/api/contents"):].lstrip("/")
+        if request.method == "DELETE":
+            if rel == "content/old.txt":
+                deleted_rels.append(rel)
+                return httpx.Response(204)
+            if rel == "content/missing.txt":
+                return httpx.Response(404)
+            if rel == "content/nonempty_dir":
+                return httpx.Response(400, json={"message": "Directory not empty"})
+        return httpx.Response(405)
+
+    transport = httpx.MockTransport(handler)
+    orig_async_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: orig_async_client(*args, **{**kwargs, "transport": transport}),
+    )
+
+    fake_mgr = AsyncMock()
+    fake_mgr.get_kernel_connection_params = AsyncMock(return_value=_fake_params())
+    monkeypatch.setattr("colab_mcp.files.tools.get_session_manager", lambda: fake_mgr)
+
+    with pytest.raises(ValueError, match="protected root"):
+        await delete_file_impl("/content")
+
+    with pytest.raises(ValueError, match="protected root"):
+        await delete_file_impl("/")
+
+    res = await delete_file_impl("/content/old.txt")
+    assert res.status == "deleted"
+    assert res.delete_method == "contents_api"
+    assert deleted_rels == ["content/old.txt"]
+
+    with pytest.raises(FileNotFoundError):
+        await delete_file_impl("/content/missing.txt")
+
+    with pytest.raises(ValueError, match="recursive=True"):
+        await delete_file_impl("/content/nonempty_dir", recursive=False)
+
+    fake_client = AsyncMock()
+    fake_raw = AsyncMock()
+    fake_raw.has_error = False
+    fake_raw.iopub_messages = [
+        {"header": {"msg_type": "stream"}, "content": {"name": "stdout", "text": '{"deleted": "/content/nonempty_dir"}\n'}}
+    ]
+    fake_client.execute_raw = AsyncMock(return_value=fake_raw)
+    monkeypatch.setattr("colab_mcp.files.tools.get_active_kernel_client", AsyncMock(return_value=fake_client))
+
+    rec_res = await delete_file_impl("/content/nonempty_dir", recursive=True)
+    assert rec_res.delete_method == "kernel_recursive"
+    assert rec_res.recursive is True

@@ -197,7 +197,7 @@ Opens a real Google Chrome window (`--remote-debugging-port=9222`) for interacti
 
 ## 🛠️ Complete MCP Tool Reference
 
-`colab-mcp` exposes **24 MCP tools** across four categories:
+`colab-mcp` exposes **25 MCP tools** across four categories:
 
 ### 1. Authentication & Secrets Vault Tools (6)
 
@@ -214,7 +214,7 @@ Opens a real Google Chrome window (`--remote-debugging-port=9222`) for interacti
 
 | Tool Name | Key Parameters | Description |
 |---|---|---|
-| `colab_list_runtime_types` | `auth_user_index` (default `0`) | Query live accelerator eligibility (`NONE`, `T4`, `L4`, `A100`, `H100`, `V5E1`, `V6E1`), RAM shapes, and hourly CCU rates. |
+| `colab_list_runtime_types` | `auth_user_index` (default `0`) | Query live accelerator eligibility (`NONE`, `T4`, `L4`, `G4`, `A100`, `H100`, `V5E1`, `V6E1`), RAM shapes, and hourly CCU rates. |
 | `colab_list_sessions` | `auth_user_index` (default `0`), `probe_kernels` (`true`) | List all active remote and locally tracked Colab VM sessions (including browser or prior-run sessions) with live kernel state. |
 | `colab_connect_runtime` | `accelerator`, `high_ram`, `reuse_existing` (`true`), `auth_user_index`, `timeout_seconds` | Provision a new Colab VM or re-attach to an existing matching session and initialize keep-alive heartbeat. |
 | `colab_get_runtime_status` | `runtime_id` (optional) | Inspect VM health, live kernel execution state, uptime, idle timer, and keep-alive status. |
@@ -232,13 +232,14 @@ Opens a real Google Chrome window (`--remote-debugging-port=9222`) for interacti
 | `colab_send_input` | `execution_id`, `value` | Deliver a `stdin` reply (`$SECRET:<NAME>` supported) to an async execution blocked on `input()` or `getpass()`. |
 | `colab_interrupt_execution` | `runtime_id` (optional) | Send non-destructive SIGINT first; escalates to kernel restart after 5.0s if unresponsive, reporting `state_reset` and `kernel_restarted`. |
 
-### 4. VM File Transfer & Google Drive Tools (6)
+### 4. VM File Transfer & Google Drive Tools (7)
 
 | Tool Name | Key Parameters | Description |
 |---|---|---|
 | `colab_list_files` | `remote_path` (default `"/content"`), `runtime_id` (optional) | List files and directories on the connected Colab VM. |
 | `colab_download_file` | `remote_path`, `local_path`, `runtime_id` (optional) | Download any file (e.g., exported `.zip`, CSV, checkpoint) from the Colab VM to local disk with SHA-256 verification and automatic chunked fallback for large files. |
 | `colab_upload_file` | `local_path`, `remote_path`, `runtime_id` (optional) | Upload a local file (dataset, `.zip` bundle, script) onto the connected Colab VM. |
+| `colab_delete_file` | `remote_path`, `recursive` (`false`), `runtime_id` (optional) | Delete a file or directory on the connected Colab VM (`recursive=true` for non-empty folders). |
 | `colab_drive_list` | `folder` (default `"MyDrive"`), `query`, `max_results`, `auth_user_index`, `quota_project_id` | List files and folders in Google Drive via Drive API v3. |
 | `colab_drive_download` | `file_id_or_path`, `local_path`, `runtime_path`, `auth_user_index`, `runtime_id`, `quota_project_id` | Download a file from Google Drive to local disk and/or directly onto the connected Colab VM. |
 | `colab_drive_upload` | `local_path` \| `runtime_path`, `drive_folder`, `file_name`, `auth_user_index`, `runtime_id`, `quota_project_id` | Upload a file from local disk or directly from the Colab VM into Google Drive. |
@@ -249,7 +250,7 @@ Opens a real Google Chrome window (`--remote-debugging-port=9222`) for interacti
 
 ## 💻 CLI Reference (`colab-mcp`)
 
-`colab-mcp` provides a **24-command full-parity CLI** alongside its MCP server. Commands share an encrypted OS keystore and a token-free CLI session pointer (`~/.colabmcp/cli_session.json`), support human-readable tables by default with `--json` for scripts/agents, and return typed exit codes (`10` auth, `11` quota/capacity, `12` disconnected, `13` execution error).
+`colab-mcp` provides a **28-command CLI** alongside its 25-tool MCP server (including exclusive CLI `ssh`, `job`, and `runtime-url` workflows). Commands share an encrypted OS keystore and a token-free CLI session pointer (`~/.colabmcp/cli_session.json`), support human-readable tables by default with `--json` for scripts/agents, and return typed exit codes (`10` auth, `11` quota/capacity, `12` disconnected, `13` execution error).
 
 ### Quick CLI Workflow
 
@@ -264,15 +265,23 @@ colab-mcp execute-code --file train.py --save-images-dir ./plots
 colab-mcp system-metrics
 colab-mcp execute-notebook experiment.ipynb --output-save-path executed.ipynb
 
-# 3. Transfer files or pull checkpoints, then disconnect to stop CCU burn
+# 3. Transfer files, attach browser UI, SSH, or run ephemeral shebang jobs
 colab-mcp download-file /content/model.pt ./model.pt
+colab-mcp runtime-url --open
+colab-mcp ssh -- nvidia-smi
 colab-mcp disconnect
 
-# Bonus: auto-configure Claude Desktop, Cursor, Antigravity, or VS Code MCP config
+# Fire-and-forget GPU script (auto-disconnects in finally, propagates exit code):
+colab-mcp job --accelerator T4 train.py --epochs 10
+
+# Print ~/.ssh/config snippet for VS Code / Cursor Remote-SSH:
+colab-mcp ssh --ssh-config --accelerator T4 --rm
+
+# Auto-configure Claude Desktop, Claude Code, Cursor, Antigravity, or VS Code MCP config:
 colab-mcp setup-mcp --client cursor
 ```
 
-### Complete Command Catalog (24 Commands)
+### Complete Command Catalog (28 Commands)
 
 | Category | Command | Description |
 |---|---|---|
@@ -285,21 +294,25 @@ colab-mcp setup-mcp --client cursor
 | | `set-secret` | Encrypt and store a token/secret in the vault via hidden prompt or `--value`. |
 | | `list-secrets` | List stored secret names and masked previews. |
 | | `delete-secret` | Remove a stored secret/token from the vault. |
-| **Runtime & Telemetry** | `list-runtimes` | List available hardware accelerators (`NONE`..`H100`, `V5E1`, `V6E1`) and hourly CCU rates. |
+| **Runtime & Telemetry** | `list-runtimes` | List available hardware accelerators (`NONE`, `T4`, `L4`, `G4`, `A100`, `H100`, `V5E1`, `V6E1`) and hourly CCU rates. |
 | | `list-sessions` | List all active remote and locally tracked Colab sessions. |
 | | `connect-runtime` | Provision or attach a Colab VM (`--accelerator T4`, `--high-ram`) and save the active CLI session. |
 | | `runtime-status` | Inspect active VM health, kernel execution state, and uptime. |
+| | `runtime-url` | Print (or `--open`) a Colab browser UI link attached directly to the active runtime. |
 | | `system-metrics` | Show live GPU VRAM/utilization, system RAM, and `/content` disk usage. |
 | | `disconnect` | Terminate the active session, a target `--runtime-id`, or all sessions (`--all`). |
 | **Code & Notebooks** | `execute-code` | Execute inline code, `--file`, or `-` (stdin); supports `--stdin-input`, `--env`, `--save-images-dir`, `--non-interactive`. |
+| | `job` | Provision an ephemeral VM, run `SCRIPT [ARGS...]` (`__main__`, shebang, exit-code propagation), and auto-disconnect (`--keep` to preserve). |
 | | `execute-notebook` | Execute `.ipynb` notebooks cell-by-cell (`--cell-index`, `--no-reset-kernel`, `--output-save-path`). |
 | | `interrupt` | Send SIGINT (escalating to kernel restart if hung) to the active kernel. |
 | **VM Files & Drive** | `list-files` | List files and directories on the connected Colab VM (default `/content`). |
 | | `upload-file` | Upload a local file to the Colab VM with SHA-256 verification. |
 | | `download-file` | Download any file from the Colab VM to local disk (with chunked fallback). |
+| | `delete-file` | Delete a remote file or directory (`--recursive`) on the Colab VM. |
 | | `drive-list` | List files and folders in Google Drive via Drive API v3. |
 | | `drive-download` | Download a Google Drive file to `--local-path` and/or `--runtime-path`. |
 | | `drive-upload` | Upload from `--local-path` or `--runtime-path` directly to Google Drive. |
+| **Remote SSH** | `ssh` | WebSocket SSH (`/colab/ssh`): interactive shell, OpenSSH `--proxy-mode`, `-- CMD` one-shots, `--rm`, `--force`, `--ssh-config`. |
 
 ### Exit Codes
 
@@ -322,6 +335,7 @@ colab-mcp setup-mcp --client cursor
 | `NONE` | 2 vCPU Intel Xeon | None | Pro/Pro+ only | Yes | 0.00 CCU/hr |
 | `T4` | NVIDIA Tesla T4 | 16 GB GDDR6 | Pro/Pro+ only | Yes (Dynamic) | ~1.96 CCU/hr |
 | `L4` | NVIDIA L4 Tensor Core | 24 GB GDDR6 | Supported | Pro/Pro+ | ~3.84 CCU/hr |
+| `G4` | NVIDIA RTX PRO 6000 | 96 GB GDDR7 | Supported | Pro/Pro+ | ~6.70 CCU/hr |
 | `A100` | NVIDIA A100-SXM4 | 40 GB / 80 GB | Supported | Pro/Pro+ | ~5.42 - 11.2 CCU/hr |
 | `H100` | NVIDIA H100-SXM5 | 80 GB HBM3 | Supported | Pro+ | ~13.50 CCU/hr |
 | `V5E1` | Cloud TPU v5e | 16 GB HBM | Standard Shape | Pro/Pro+ | ~1.96 CCU/hr |

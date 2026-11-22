@@ -31,6 +31,7 @@ from colab_mcp.cli_session import (
 )
 from colab_mcp.cli_setup import configure_mcp_clients, resolve_client_config_path
 from colab_mcp.files.models import (
+    DeleteFileResponse,
     DownloadFileResponse,
     DriveFileEntry,
     DriveListResponse,
@@ -282,17 +283,21 @@ def test_cli_24_commands_registered():
         "list-sessions",
         "connect-runtime",
         "runtime-status",
+        "runtime-url",
         "system-metrics",
         "disconnect",
         "execute-code",
+        "job",
         "execute-notebook",
         "interrupt",
         "list-files",
         "upload-file",
         "download-file",
+        "delete-file",
         "drive-list",
         "drive-download",
         "drive-upload",
+        "ssh",
     }
     registered = {cmd.name for cmd in cli_app.registered_commands if cmd.name}
     assert expected_commands.issubset(registered)
@@ -522,6 +527,12 @@ def test_cli_files_and_drive_commands(tmp_path: Path):
         sha256="def456",
         transfer_method="contents_api",
     )
+    del_resp = DeleteFileResponse(
+        runtime_id="ep-cli-1",
+        remote_path="/content/old.txt",
+        recursive=False,
+        delete_method="contents_api",
+    )
     dr_list = DriveListResponse(
         folder="MyDrive",
         files=[
@@ -551,6 +562,7 @@ def test_cli_files_and_drive_commands(tmp_path: Path):
         patch("colab_mcp.files.tools.list_files_impl", new=AsyncMock(return_value=lf_resp)),
         patch("colab_mcp.files.tools.upload_file_impl", new=AsyncMock(return_value=up_resp)),
         patch("colab_mcp.files.tools.download_file_impl", new=AsyncMock(return_value=dl_resp)),
+        patch("colab_mcp.files.tools.delete_file_impl", new=AsyncMock(return_value=del_resp)),
         patch("colab_mcp.files.tools.drive_list_impl", new=AsyncMock(return_value=dr_list)),
         patch("colab_mcp.files.tools.drive_download_impl", new=AsyncMock(return_value=dr_tr)),
         patch("colab_mcp.files.tools.drive_upload_impl", new=AsyncMock(return_value=dr_tr)),
@@ -558,6 +570,7 @@ def test_cli_files_and_drive_commands(tmp_path: Path):
         assert runner.invoke(cli_app, ["list-files"]).exit_code == 0
         assert runner.invoke(cli_app, ["upload-file", str(tmp_path / "a.txt"), "/content/a.txt", "--json"]).exit_code == 0
         assert runner.invoke(cli_app, ["download-file", "/content/out.zip", str(tmp_path / "out.zip")]).exit_code == 0
+        assert runner.invoke(cli_app, ["delete-file", "/content/old.txt", "--json"]).exit_code == 0
         r_dlist = runner.invoke(cli_app, ["drive-list"])
         assert r_dlist.exit_code == 0 and "ckpt.pt" in r_dlist.stdout
         assert runner.invoke(cli_app, ["drive-download", "id-1", "--local-path", str(tmp_path / "ckpt.pt")]).exit_code == 0

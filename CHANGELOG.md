@@ -13,6 +13,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   - Extended `.github/workflows/release.yml` with OIDC Trusted Publishing to PyPI and `mcp-publisher` OIDC publishing to the Official MCP Registry (`registry.modelcontextprotocol.io`).
 - **T4 CLI Demo Assets:**
   - Added animated terminal GIF (`docs/assets/demo.gif`) and asciinema v2 cast (`docs/assets/demo.cast`) embedded in `README.md`.
+- **SSH Bridge, Ephemeral Job Runner, Browser URL & File Delete Parity:**
+  - Added cross-platform `colab-mcp ssh` WebSocket bridge (`/colab/ssh`, OpenSSH `--proxy-mode` for VS Code / Cursor Remote-SSH, `-- CMD` one-shots, interactive PTY, `--rm` signal cleanup, `--force`, `--ssh-config`).
+  - Added `colab-mcp job` ephemeral one-shot Python runner (`sys.argv`, `__main__`, shebang stripping, CPython `sys.exit` propagation, guaranteed VM teardown unless `--keep`).
+  - Added `colab_delete_file` MCP tool & `colab-mcp delete-file` CLI command (`DELETE /api/contents/{path}` + `recursive=True` kernel cleanup).
+  - Added `colab-mcp runtime-url` (`--open`) browser UI attach command and `Accelerator.G4` hardware catalog entry.
 
 ## [0.1.0] - 2026-11-19
 

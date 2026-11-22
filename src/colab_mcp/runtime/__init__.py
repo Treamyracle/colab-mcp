@@ -37,6 +37,7 @@ from colab_mcp.runtime.session_manager import (
     get_session_manager,
     reset_session_manager,
 )
+from colab_mcp.runtime.ssh import ColabSSHError
 from colab_mcp.runtime.tools import (
     colab_connect_runtime,
     colab_disconnect_runtime,

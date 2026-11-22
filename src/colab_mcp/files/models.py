@@ -53,6 +53,16 @@ class UploadFileResponse(BaseModel):
     transfer_method: str
 
 
+class DeleteFileResponse(BaseModel):
+    """Response schema for colab_delete_file."""
+
+    status: str = "deleted"
+    runtime_id: str
+    remote_path: str
+    recursive: bool = False
+    delete_method: str = "contents_api"
+
+
 class DriveFileEntry(BaseModel):
     """Metadata for a file or folder in Google Drive."""
 

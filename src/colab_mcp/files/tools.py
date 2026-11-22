@@ -18,6 +18,7 @@ from mcp.server.mcpserver import MCPServer
 
 from colab_mcp.auth.oauth import get_valid_auth_headers
 from colab_mcp.files.models import (
+    DeleteFileResponse,
     DownloadFileResponse,
     DriveFileEntry,
     DriveListResponse,
@@ -34,6 +35,7 @@ logger = get_logger(__name__)
 
 _CONTENTS_API_MAX_BYTES = 15 * 1024 * 1024  # 15 MB single-shot threshold
 _KERNEL_CHUNK_BYTES = 512 * 1024  # 512 KB base64 chunk size
+_PROTECTED_REMOTE_DELETE_PATHS = frozenset({"/", "/content"})
 _DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files"
 _DRIVE_UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files"
 _DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
@@ -445,6 +447,69 @@ async def upload_file_impl(
     )
 
 
+async def delete_file_impl(
+    remote_path: str,
+    recursive: bool = False,
+    runtime_id: Optional[str] = None,
+) -> DeleteFileResponse:
+    """Core logic for colab_delete_file."""
+    abs_remote = _normalize_remote_posix(remote_path)
+    if abs_remote in _PROTECTED_REMOTE_DELETE_PATHS:
+        raise ValueError(f"Refusing to delete protected root directory: '{abs_remote}'.")
+
+    mgr = get_session_manager()
+    params = await mgr.get_kernel_connection_params(runtime_id=runtime_id)
+    rel = _to_contents_rel_path(abs_remote)
+
+    if rel:
+        url = f"{params.proxy_url.rstrip('/')}/api/contents/{quote(rel, safe='/')}"
+        headers = _proxy_headers(params.proxy_token, params.client_agent)
+        async with httpx.AsyncClient(timeout=30.0) as http:
+            del_resp = await http.delete(url, headers=headers)
+            if del_resp.status_code == 404:
+                raise FileNotFoundError(f"Remote path not found: {abs_remote}")
+            if del_resp.status_code in (200, 204):
+                return DeleteFileResponse(
+                    status="deleted",
+                    runtime_id=params.endpoint,
+                    remote_path=abs_remote,
+                    recursive=recursive,
+                    delete_method="contents_api",
+                )
+            if del_resp.status_code == 400:
+                if not recursive:
+                    raise ValueError(
+                        f"Remote directory '{abs_remote}' is not empty. "
+                        "Pass recursive=True to remove it recursively."
+                    )
+            else:
+                del_resp.raise_for_status()
+
+    script = (
+        "import json, os, shutil\n"
+        f"_p = {abs_remote!r}\n"
+        f"_rec = {bool(recursive)!r}\n"
+        "if not os.path.lexists(_p):\n"
+        "    raise FileNotFoundError(_p)\n"
+        "if os.path.isdir(_p) and not os.path.islink(_p):\n"
+        "    if _rec:\n"
+        "        shutil.rmtree(_p)\n"
+        "    else:\n"
+        "        os.rmdir(_p)\n"
+        "else:\n"
+        "    os.unlink(_p)\n"
+        "print(json.dumps({'deleted': _p}))\n"
+    )
+    await _kernel_exec_json(script, runtime_id=params.endpoint)
+    return DeleteFileResponse(
+        status="deleted",
+        runtime_id=params.endpoint,
+        remote_path=abs_remote,
+        recursive=recursive,
+        delete_method="kernel_recursive" if recursive else "kernel_unlink",
+    )
+
+
 async def _resolve_drive_folder_id(
     http: httpx.AsyncClient,
     headers: Dict[str, str],
@@ -734,6 +799,24 @@ def register_file_tools(mcp: MCPServer) -> None:
         return await upload_file_impl(
             local_path=local_path,
             remote_path=remote_path,
+            runtime_id=runtime_id,
+        )
+
+    @mcp.tool(
+        name="colab_delete_file",
+        description=(
+            "Delete a file or directory on the connected Colab VM (pass recursive=True to "
+            "remove non-empty directories)."
+        ),
+    )
+    async def colab_delete_file(
+        remote_path: str,
+        recursive: bool = False,
+        runtime_id: Optional[str] = None,
+    ) -> DeleteFileResponse:
+        return await delete_file_impl(
+            remote_path=remote_path,
+            recursive=recursive,
             runtime_id=runtime_id,
         )
 

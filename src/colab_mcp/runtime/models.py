@@ -30,6 +30,7 @@ class Accelerator(str, Enum):
     NONE = "NONE"
     T4 = "T4"
     L4 = "L4"
+    G4 = "G4"
     A100 = "A100"
     H100 = "H100"
     V5E1 = "V5E1"
@@ -47,6 +48,7 @@ _ACCELERATOR_TO_VARIANT: Dict[Accelerator, Variant] = {
     Accelerator.NONE: Variant.DEFAULT,
     Accelerator.T4: Variant.GPU,
     Accelerator.L4: Variant.GPU,
+    Accelerator.G4: Variant.GPU,
     Accelerator.A100: Variant.GPU,
     Accelerator.H100: Variant.GPU,
     Accelerator.V5E1: Variant.TPU,
@@ -158,6 +160,17 @@ ACCELERATOR_CATALOG: Dict[Accelerator, AcceleratorSpec] = {
         high_ram_supported=True,
         free_tier_available=False,
         ccu_cost_per_hour=3.84,
+        available=True,
+    ),
+    Accelerator.G4: AcceleratorSpec(
+        accelerator="G4",
+        variant="GPU",
+        display_name="NVIDIA RTX PRO 6000 (G4)",
+        vram="96 GB GDDR7",
+        system_ram="High-RAM Pro/Pro+ shape",
+        high_ram_supported=True,
+        free_tier_available=False,
+        ccu_cost_per_hour=6.70,
         available=True,
     ),
     Accelerator.A100: AcceleratorSpec(
