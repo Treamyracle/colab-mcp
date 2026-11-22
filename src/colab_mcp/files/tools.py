@@ -126,6 +126,18 @@ def _raise_for_drive_error(resp: httpx.Response) -> None:
             "or transfer files directly between your Colab VM and local disk using "
             "colab_download_file / colab_upload_file."
         )
+    if resp.status_code == 403 and (
+        "service_disabled" in lowered
+        or "has not been used in project" in lowered
+        or ("drive.googleapis.com" in lowered and "disabled" in lowered)
+    ):
+        raise ValueError(
+            "Google Drive API (`drive.googleapis.com`) is disabled on your GCP quota project "
+            "(HTTP 403). Enable it with `gcloud services enable drive.googleapis.com "
+            "--project=<your-gcp-project-id>` or in Google Cloud Console, or transfer files "
+            "directly between your Colab VM and local disk using "
+            "colab_download_file / colab_upload_file."
+        )
     if resp.status_code == 403 and ("insufficient" in lowered or "scope" in lowered or "permission" in lowered):
         raise ValueError(
             "Google Drive API denied access due to insufficient OAuth scope (HTTP 403). "

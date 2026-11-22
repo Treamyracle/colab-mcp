@@ -159,6 +159,26 @@ async def test_drive_list_upload_download_and_quota_error(tmp_path: Path, monkey
         url = str(request.url)
         if request.headers.get("X-Goog-User-Project") == "missing-proj-test":
             return httpx.Response(403, json={"error": {"message": "requires a quota project"}})
+        if request.headers.get("X-Goog-User-Project") == "disabled-drive-proj":
+            return httpx.Response(
+                403,
+                json={
+                    "error": {
+                        "code": 403,
+                        "status": "PERMISSION_DENIED",
+                        "message": (
+                            "Google Drive API has not been used in project disabled-drive-proj "
+                            "before or it is disabled."
+                        ),
+                        "errors": [{"reason": "accessNotConfigured"}],
+                    }
+                },
+            )
+        if request.headers.get("X-Goog-User-Project") == "scope-proj-test":
+            return httpx.Response(
+                403,
+                json={"error": {"message": "Request had insufficient authentication scopes."}},
+            )
         if request.url.path == "/drive/v3/files" and request.method == "GET":
             q = request.url.params.get("q", "")
             if "SKRIPSI_NER_BAB4" in q:
@@ -211,6 +231,12 @@ async def test_drive_list_upload_download_and_quota_error(tmp_path: Path, monkey
 
     with pytest.raises(ValueError, match="quota project"):
         await drive_list_impl(folder="MyDrive", quota_project_id="missing-proj-test")
+
+    with pytest.raises(ValueError, match="disabled on your GCP quota project"):
+        await drive_list_impl(folder="MyDrive", quota_project_id="disabled-drive-proj")
+
+    with pytest.raises(ValueError, match="insufficient OAuth scope"):
+        await drive_list_impl(folder="MyDrive", quota_project_id="scope-proj-test")
 
 
 @pytest.mark.asyncio

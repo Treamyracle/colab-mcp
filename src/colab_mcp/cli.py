@@ -1157,7 +1157,10 @@ def job(
 
     try:
         env_map = _parse_env_pairs(env)
-        source_payload = build_job_payload(script, script_args or [])
+        raw_args = list(script_args or [])
+        if raw_args and raw_args[0] == "--":
+            raw_args = raw_args[1:]
+        source_payload = build_job_payload(script, raw_args)
     except Exception as exc:
         emit_error(exc, as_json=json_output)
 

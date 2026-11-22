@@ -242,3 +242,75 @@ async def test_session_manager_get_runtime_proxy_params_skips_kernel_discovery()
         ep, url, tok, _ = await mgr.get_runtime_proxy_params("ep-no-kernel")
     assert (ep, url, tok) == ("ep-no-kernel", "https://proxy.colab.test", "tok-xyz")
     m_kernel.assert_not_called()
+
+
+def test_cli_job_strips_single_leading_double_dash_separator(
+    mock_keystore_dir: Path,
+    tmp_path: Path,
+):
+    script = tmp_path / "args_task.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+
+    conn_resp = ConnectRuntimeResponse(
+        runtime_id="ep-job-dash",
+        accelerator="NONE",
+        variant="DEFAULT",
+        kernel_id="k-dash",
+    )
+    disc_resp = DisconnectRuntimeResponse(
+        runtime_id="ep-job-dash",
+        status="disconnected",
+        terminated_runtime_ids=["ep-job-dash"],
+        terminated_count=1,
+        message="Disconnected.",
+    )
+    seen = {}
+
+    async def fake_exec(**kwargs):
+        seen["code"] = kwargs["code"]
+        return [TextContent(type="text", text="ok\n")], False
+
+    with (
+        patch("colab_mcp.runtime.tools.connect_runtime_impl", AsyncMock(return_value=conn_resp)),
+        patch("colab_mcp.kernel.tools.execute_code_impl", AsyncMock(side_effect=fake_exec)),
+        patch("colab_mcp.runtime.tools.disconnect_runtime_impl", AsyncMock(return_value=disc_resp)),
+    ):
+        runner = CliRunner()
+        res = runner.invoke(
+            cli_app,
+            ["job", "--accelerator", "NONE", "--json", str(script), "--", "--epochs", "3"],
+        )
+
+    assert res.exit_code == 0
+    assert "sys.argv = ['args_task.py', '--epochs', '3']" in seen["code"]
+
+
+@pytest.mark.asyncio
+async def test_session_manager_reattaches_remote_session_on_explicit_runtime_id(
+    mock_keystore_dir: Path,
+    mock_keyring,
+    sample_credentials,
+):
+    from colab_mcp.auth.keystore import store_credentials
+
+    store_credentials(0, sample_credentials)
+    mgr = SessionManager()
+    remote_assignment = Assignment(
+        endpoint="ep-remote-1",
+        accelerator="NONE",
+        variant="DEFAULT",
+        runtime_proxy_url="https://remote-proxy.colab.test",
+        runtime_proxy_token="remote-tok-1",
+        token_expires_in=3600,
+    )
+
+    with patch("colab_mcp.runtime.session_manager.ColabTFEClient") as m_client_cls:
+        inst = m_client_cls.return_value
+        inst.__aenter__ = AsyncMock(return_value=inst)
+        inst.__aexit__ = AsyncMock(return_value=False)
+        inst.list_assignments = AsyncMock(return_value=[remote_assignment])
+
+        ep, url, tok, _ = await mgr.get_runtime_proxy_params("ep-remote-1")
+
+    assert (ep, url, tok) == ("ep-remote-1", "https://remote-proxy.colab.test", "remote-tok-1")
+    assert mgr.has_active_session("ep-remote-1") is True

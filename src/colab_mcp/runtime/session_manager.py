@@ -511,6 +511,54 @@ class SessionManager:
 
         raise RuntimeDisconnectedError("Failed to discover or initialize Jupyter kernel.")
 
+    async def _reattach_remote_session(
+        self, runtime_id: str
+    ) -> Optional[RuntimeSessionRecord]:
+        """Re-attach an active remote TFE runtime by endpoint when stored credentials exist."""
+        from colab_mcp.auth.keystore import get_credentials, list_stored_user_indices
+
+        async with self._get_endpoint_lock(runtime_id):
+            existing = self.get_session(runtime_id)
+            if existing is not None and existing.assignment is not None:
+                return existing
+
+            candidates = list(dict.fromkeys([0, *list_stored_user_indices()]))
+            for uidx in candidates:
+                if get_credentials(uidx) is None:
+                    continue
+                try:
+                    async with ColabTFEClient(
+                        auth_user_index=uidx, timeout=15.0
+                    ) as tfe_client:
+                        active = await tfe_client.list_assignments()
+                except Exception as exc:
+                    logger.debug(
+                        "Remote session re-attach probe failed for auth_user_index=%s: %s",
+                        uidx,
+                        exc,
+                    )
+                    continue
+                matched = next(
+                    (
+                        item
+                        for item in active
+                        if item.endpoint == runtime_id
+                        and item.runtime_proxy_url
+                        and item.runtime_proxy_token
+                    ),
+                    None,
+                )
+                if matched is not None and matched.endpoint:
+                    high_ram = str(matched.machine_shape or "").upper() in ("HM", "HIGH_RAM")
+                    return self.register_session(
+                        endpoint=matched.endpoint,
+                        auth_user_index=uidx,
+                        assignment=matched,
+                        keepalive_daemon=None,
+                        high_ram=high_ram,
+                    )
+        return None
+
     async def get_runtime_proxy_params(
         self, runtime_id: Optional[str] = None
     ) -> tuple[str, str, str, datetime]:
@@ -521,6 +569,8 @@ class SessionManager:
         or initializing a Jupyter kernel, allowing SSH and browser-URL attachment cleanly.
         """
         record = self.get_session(runtime_id)
+        if (record is None or record.assignment is None) and runtime_id is not None:
+            record = await self._reattach_remote_session(runtime_id)
         if record is None or record.assignment is None:
             raise RuntimeDisconnectedError(
                 f"Runtime '{runtime_id or 'active'}' is disconnected or not found."
