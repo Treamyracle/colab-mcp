@@ -490,24 +490,40 @@ class SessionManager:
             "X-Colab-Client-Agent": client_agent,
             "Accept": "application/json",
         }
-        async with httpx.AsyncClient(timeout=15.0) as http:
-            resp = await http.get(f"{base}/api/kernels", headers=headers)
-            resp.raise_for_status()
-            kernels = resp.json()
-            if isinstance(kernels, list) and kernels:
-                first = kernels[0]
-                if isinstance(first, dict) and first.get("id"):
-                    return str(first["id"])
+        retry_delays = (0.5, 1.0)
+        for attempt in range(len(retry_delays) + 1):
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as http:
+                    resp = await http.get(f"{base}/api/kernels", headers=headers)
+                    resp.raise_for_status()
+                    kernels = resp.json()
+                    if isinstance(kernels, list) and kernels:
+                        first = kernels[0]
+                        if isinstance(first, dict) and first.get("id"):
+                            return str(first["id"])
 
-            create_resp = await http.post(
-                f"{base}/api/kernels",
-                headers=headers,
-                json={"name": "python3"},
-            )
-            create_resp.raise_for_status()
-            created = create_resp.json()
-            if isinstance(created, dict) and created.get("id"):
-                return str(created["id"])
+                    create_resp = await http.post(
+                        f"{base}/api/kernels",
+                        headers=headers,
+                        json={"name": "python3"},
+                    )
+                    create_resp.raise_for_status()
+                    created = create_resp.json()
+                    if isinstance(created, dict) and created.get("id"):
+                        return str(created["id"])
+                break
+            except (httpx.TimeoutException, httpx.TransportError, httpx.HTTPStatusError) as exc:
+                transient_http = (
+                    isinstance(exc, httpx.HTTPStatusError)
+                    and exc.response.status_code in (502, 503, 504)
+                )
+                if (
+                    attempt < len(retry_delays)
+                    and (not isinstance(exc, httpx.HTTPStatusError) or transient_http)
+                ):
+                    await asyncio.sleep(retry_delays[attempt])
+                    continue
+                raise
 
         raise RuntimeDisconnectedError("Failed to discover or initialize Jupyter kernel.")
 
@@ -668,8 +684,9 @@ class SessionManager:
                 except RuntimeDisconnectedError:
                     raise
                 except Exception as exc:
+                    detail = str(exc).strip() or type(exc).__name__
                     raise RuntimeDisconnectedError(
-                        f"Unable to reach kernel API for runtime '{record.endpoint}': {exc}"
+                        f"Unable to reach kernel API for runtime '{record.endpoint}': {detail}"
                     ) from exc
 
             return KernelConnectionParams(

@@ -244,7 +244,7 @@ Opens a real Google Chrome window (`--remote-debugging-port=9222`) for interacti
 | `colab_drive_download` | `file_id_or_path`, `local_path`, `runtime_path`, `auth_user_index`, `runtime_id`, `quota_project_id` | Download a file from Google Drive to local disk and/or directly onto the connected Colab VM. |
 | `colab_drive_upload` | `local_path` \| `runtime_path`, `drive_folder`, `file_name`, `auth_user_index`, `runtime_id`, `quota_project_id` | Upload a file from local disk or directly from the Colab VM into Google Drive. |
 
-> **Headless Colab Popup Handling:** `colab-mcp` automatically injects headless shims into connected kernels so `google.colab.userdata.get(...)`, `google.colab.auth.authenticate_user()`, `google.colab.files.upload()` / `files.download()`, and `google.colab.drive.mount('/content/drive')` (Option A: creates `/content/drive/MyDrive` workspace cleanly without blocking) work without browser UI modals. Use `colab_drive_upload` / `colab_drive_download` to sync files directly with Google Drive.
+> **Headless Colab Popup Handling:** `colab-mcp` automatically injects headless shims into connected kernels so `google.colab.userdata.get(...)`, `google.colab.auth.authenticate_user()`, `google.colab.files.upload()` / `files.download()`, and `google.colab.drive.mount('/content/drive')` (Option A: creates `/content/drive/MyDrive` workspace cleanly without blocking) work without browser UI modals. Use `colab_drive_upload` / `colab_drive_download` to sync files directly with Google Drive (requires `drive.googleapis.com` enabled on a `quota_project_id` / `COLAB_MCP_GCP_PROJECT` when using Google's public OAuth client; default `drive.file` scope covers app-uploaded files, while full-Drive listing uses a custom OAuth client in `~/.colabmcp/config.json`).
 
 ---
 
@@ -288,7 +288,7 @@ colab-mcp setup-mcp --client cursor
 | **Server & Setup** | `run` | Start the MCP server (`stdio` or `sse` with `--host` and `--port`). |
 | | `setup-mcp` | Auto-configure `colab-mcp` in Claude Desktop, Claude Code, Cursor, Antigravity, or VS Code (`--dry-run`, `--remove`). |
 | | `version` | Print the installed `colab-mcp` version (`--json`). |
-| **Auth & Secrets** | `login` | Authenticate a Google account (`oauth_remote`, `oauth_loopback`, `oauth_adc`, `cdp_browser`). |
+| **Auth & Secrets** | `login` | Authenticate a Google account (`oauth_remote`, `oauth_loopback`, `oauth_adc`, `cdp_browser`, `cookie_import`). |
 | | `status` | Show authentication status, tier, CCU balance, and active runtime state. |
 | | `logout` | Terminate active sessions and purge stored credentials. |
 | | `set-secret` | Encrypt and store a token/secret in the vault via hidden prompt or `--value`. |
@@ -312,7 +312,7 @@ colab-mcp setup-mcp --client cursor
 | | `drive-list` | List files and folders in Google Drive via Drive API v3. |
 | | `drive-download` | Download a Google Drive file to `--local-path` and/or `--runtime-path`. |
 | | `drive-upload` | Upload from `--local-path` or `--runtime-path` directly to Google Drive. |
-| **Remote SSH** | `ssh` | WebSocket SSH (`/colab/ssh`): interactive shell, OpenSSH `--proxy-mode`, `-- CMD` one-shots, `--rm`, `--force`, `--ssh-config`. |
+| **Remote SSH** | `ssh` | WebSocket SSH (`/colab/ssh`, when exposed by the runtime proxy; returns HTTP `404` otherwise): interactive shell, OpenSSH `--proxy-mode`, `-- CMD` one-shots, `--rm`, `--force`, `--ssh-config`. |
 
 ### Exit Codes
 

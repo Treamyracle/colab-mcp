@@ -314,3 +314,62 @@ async def test_session_manager_reattaches_remote_session_on_explicit_runtime_id(
 
     assert (ep, url, tok) == ("ep-remote-1", "https://remote-proxy.colab.test", "remote-tok-1")
     assert mgr.has_active_session("ep-remote-1") is True
+
+
+@pytest.mark.asyncio
+async def test_session_manager_kernel_discovery_retries_transient_cold_boot(monkeypatch):
+    import httpx
+    from colab_mcp.runtime.models import RuntimeDisconnectedError
+
+    mgr = SessionManager()
+    mgr.register_session(
+        endpoint="ep-cold",
+        assignment=Assignment(
+            endpoint="ep-cold",
+            accelerator="NONE",
+            variant="DEFAULT",
+            runtime_proxy_url="https://cold-proxy.colab.test",
+            runtime_proxy_token="tok-cold",
+            token_expires_in=3600,
+        ),
+    )
+
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ReadTimeout("", request=request)
+        if calls == 2:
+            return httpx.Response(503, text="booting")
+        return httpx.Response(200, json=[{"id": "kern-warm"}])
+
+    transport = httpx.MockTransport(handler)
+    orig_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: orig_client(*args, **{**kwargs, "transport": transport}),
+    )
+    monkeypatch.setattr("colab_mcp.runtime.session_manager.asyncio.sleep", AsyncMock())
+
+    params = await mgr.get_kernel_connection_params("ep-cold")
+    assert params.kernel_id == "kern-warm"
+    assert calls == 3
+
+    mgr2 = SessionManager()
+    mgr2.register_session(
+        endpoint="ep-dead",
+        assignment=Assignment(
+            endpoint="ep-dead",
+            accelerator="NONE",
+            variant="DEFAULT",
+            runtime_proxy_url="https://dead-proxy.colab.test",
+            runtime_proxy_token="tok-dead",
+            token_expires_in=3600,
+        ),
+    )
+    with patch.object(mgr2, "_discover_or_create_kernel", AsyncMock(side_effect=httpx.ReadTimeout(""))):
+        with pytest.raises(RuntimeDisconnectedError, match="ReadTimeout"):
+            await mgr2.get_kernel_connection_params("ep-dead")
