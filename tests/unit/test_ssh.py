@@ -162,6 +162,7 @@ async def test_ssh_websocket_wire_contract_and_stdio_bridge():
     lower_headers = {k.lower(): v for k, v in received_headers.items()}
     assert lower_headers["x-colab-ssh-pubkey"] == "ssh-ed25519 WIRETEST"
     assert lower_headers["x-colab-client-agent"] == "colab-mcp"
+    assert "x-colab-runtime-proxy-token" not in lower_headers
     assert echoed_frames == [b"hello-ssh-bytes"]
     assert out_stream.getvalue() == b"srv:hello-ssh-bytes"
 

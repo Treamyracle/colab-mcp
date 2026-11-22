@@ -221,10 +221,11 @@ async def connect_ssh_websocket(
 ) -> Any:
     """Open the authenticated WebSocket stream to ``/colab/ssh``."""
     ws_url = build_ssh_ws_url(proxy_url, proxy_token, mode=mode)
+    # Pass proxy token solely via the query string; sending X-Colab-Runtime-Proxy-Token
+    # as an HTTP header causes Colab's proxy to route /colab/ssh to Jupyter (-> HTTP 404).
     headers = {
         _PUBKEY_HEADER: pubkey,
         "X-Colab-Client-Agent": _CLIENT_AGENT_VALUE,
-        "X-Colab-Runtime-Proxy-Token": proxy_token,
     }
     headers_param = select_ws_headers_param(websockets.connect)
     ws_kwargs: Dict[str, Any] = {

@@ -312,7 +312,7 @@ colab-mcp setup-mcp --client cursor
 | | `drive-list` | List files and folders in Google Drive via Drive API v3. |
 | | `drive-download` | Download a Google Drive file to `--local-path` and/or `--runtime-path`. |
 | | `drive-upload` | Upload from `--local-path` or `--runtime-path` directly to Google Drive. |
-| **Remote SSH** | `ssh` | WebSocket SSH (`/colab/ssh`, when exposed by the runtime proxy; returns HTTP `404` otherwise): interactive shell, OpenSSH `--proxy-mode`, `-- CMD` one-shots, `--rm`, `--force`, `--ssh-config`. |
+| **Remote SSH** | `ssh` | WebSocket SSH (`/colab/ssh`): interactive shell, OpenSSH `--proxy-mode`, `-- CMD` one-shots, `--rm`, `--force`, `--ssh-config`. |
 
 ### Exit Codes
 
