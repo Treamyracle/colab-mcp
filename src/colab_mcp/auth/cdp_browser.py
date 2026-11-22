@@ -5,6 +5,7 @@ Chrome DevTools Protocol (CDP) headed browser automation and session cookie extr
 import asyncio
 import os
 import shutil
+import socket
 import subprocess
 import sys
 from typing import Dict, List, Optional
@@ -79,10 +80,17 @@ async def wait_for_cdp_ready(port: int = 9222, max_retries: int = 30, interval: 
     return False
 
 
+def _pick_free_cdp_port() -> int:
+    """Bind an ephemeral localhost TCP port so concurrent Chrome sessions do not collide."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
 async def launch_and_extract_cdp_cookies(
     auth_user_index: int = 0,
     timeout_seconds: int = 180,
-    cdp_port: int = 9222,
+    cdp_port: Optional[int] = None,
 ) -> GoogleCredentials:
     """
     Spawns headed Chrome on remote debugging port, attaches via Playwright CDP,
@@ -97,13 +105,14 @@ async def launch_and_extract_cdp_cookies(
             "`pip install 'colab-mcp[browser]'` and run `playwright install chromium`."
         ) from e
 
+    resolved_port = cdp_port if cdp_port is not None else _pick_free_cdp_port()
     chrome_path = find_chrome_executable()
-    user_data_dir = os.path.expanduser("~/.colabmcp/chrome_profile")
+    user_data_dir = os.path.expanduser(f"~/.colabmcp/chrome_profile_{auth_user_index}")
     os.makedirs(user_data_dir, exist_ok=True)
 
     chrome_cmd = [
         chrome_path,
-        f"--remote-debugging-port={cdp_port}",
+        f"--remote-debugging-port={resolved_port}",
         f"--user-data-dir={user_data_dir}",
         "--no-first-run",
         "--no-default-browser-check",
@@ -113,10 +122,10 @@ async def launch_and_extract_cdp_cookies(
     proc = launch_isolated_subprocess(chrome_cmd)
 
     try:
-        logger.info("Awaiting Chrome CDP readiness on port %d...", cdp_port)
-        if not await wait_for_cdp_ready(port=cdp_port, max_retries=30, interval=0.2):
+        logger.info("Awaiting Chrome CDP readiness on port %d...", resolved_port)
+        if not await wait_for_cdp_ready(port=resolved_port, max_retries=30, interval=0.2):
             raise BrowserAuthError(
-                f"Timed out waiting for Chrome DevTools Protocol port {cdp_port} to become active."
+                f"Timed out waiting for Chrome DevTools Protocol port {resolved_port} to become active."
             )
 
         extracted_cookies: Dict[str, str] = {}
@@ -124,24 +133,22 @@ async def launch_and_extract_cdp_cookies(
 
         async with async_playwright() as p:
             logger.info("Connecting Playwright over CDP...")
-            browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{cdp_port}")
+            browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{resolved_port}")
             try:
                 context = browser.contexts[0]
                 page = context.pages[0] if context.pages else await context.new_page()
 
-                start_time = asyncio.get_event_loop().time()
-                while asyncio.get_event_loop().time() - start_time < timeout_seconds:
+                start_time = asyncio.get_running_loop().time()
+                while asyncio.get_running_loop().time() - start_time < timeout_seconds:
                     current_url = page.url
                     if "colab.research.google.com" in current_url:
-                        cookie_list = await context.cookies([
-                            "https://colab.research.google.com",
-                            "https://google.com",
-                            "https://accounts.google.com",
-                        ])
+                        cookie_list = await context.cookies()
                         cookie_map = {c["name"]: c["value"] for c in cookie_list}
 
-                        # Check mandatory cookies
-                        if all(m in cookie_map for m in MANDATORY_COOKIES):
+                        has_osid = "OSID" in cookie_map or "__Secure-OSID" in cookie_map
+                        if "SAPISID" in cookie_map and "SID" in cookie_map and has_osid:
+                            if "OSID" not in cookie_map and "__Secure-OSID" in cookie_map:
+                                cookie_map["OSID"] = cookie_map["__Secure-OSID"]
                             extracted_cookies = cookie_map
                             try:
                                 page_title = await page.title()

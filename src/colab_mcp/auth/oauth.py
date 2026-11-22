@@ -5,10 +5,15 @@ Google OAuth 2.0 authentication flows, token lifecycle, and header generation.
 import asyncio
 import json
 import os
+import stat
+import sys
 import threading
+import warnings
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterator, Optional
+from pathlib import Path
+from typing import Any, Dict, Iterator, List, Optional
+from urllib.parse import parse_qs, urlparse
 
 import google.auth
 import google.auth.transport.requests
@@ -40,9 +45,9 @@ COLAB_OAUTH_SCOPES = [
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/colaboratory",
-    "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/drive.file",
 ]
+COLAB_CUSTOM_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 
 # In-memory registry to preserve InstalledAppFlow instances between remote URL generation and code exchange
 _ACTIVE_REMOTE_FLOWS: Dict[int, InstalledAppFlow] = {}
@@ -142,6 +147,79 @@ def fetch_user_email_from_token(access_token: str) -> Optional[str]:
     return None
 
 
+def _resolve_oauth_scopes(client_config: Dict[str, Any]) -> List[str]:
+    """
+    Resolve OAuth scopes cleanly: use Google's verified public client scopes for
+    ``DEFAULT_CLIENT_ID`` (avoiding restricted ``auth/drive`` blocks on consumer
+    accounts), while honoring custom ``scopes`` or allowing full Drive scope for
+    user-supplied OAuth client configs.
+    """
+    explicit_scopes = client_config.get("scopes")
+    if isinstance(explicit_scopes, list) and explicit_scopes:
+        return [str(s) for s in explicit_scopes]
+
+    installed = client_config.get("installed") if isinstance(client_config, dict) else None
+    client_id = installed.get("client_id") if isinstance(installed, dict) else None
+    if isinstance(client_id, str) and client_id and client_id != DEFAULT_CLIENT_ID:
+        return [*COLAB_OAUTH_SCOPES, COLAB_CUSTOM_DRIVE_SCOPE]
+    return list(COLAB_OAUTH_SCOPES)
+
+
+def _normalize_auth_code(raw_code: str) -> str:
+    """Accept either a bare authorization code or a full pasted redirect URL."""
+    stripped = raw_code.strip()
+    if stripped.startswith(("http://", "https://")) and "code=" in stripped:
+        parsed = urlparse(stripped)
+        codes = parse_qs(parsed.query).get("code")
+        if codes and codes[0].strip():
+            return codes[0].strip()
+    return stripped
+
+
+def _pending_pkce_file(auth_user_index: int) -> Path:
+    from colab_mcp.auth import keystore
+
+    return keystore.get_credentials_dir() / f"pending_oauth_{auth_user_index}.json"
+
+
+def _save_pending_pkce(auth_user_index: int, code_verifier: Any) -> None:
+    """Persist PKCE code_verifier across separate CLI invocations or MCP restarts."""
+    if not isinstance(code_verifier, str) or not code_verifier.strip():
+        return
+    from colab_mcp.auth import keystore
+
+    path = _pending_pkce_file(auth_user_index)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    payload = json.dumps({"code_verifier": code_verifier})
+    if sys.platform != "win32":
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
+        with open(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+    else:
+        tmp.write_text(payload, encoding="utf-8")
+    os.replace(tmp, path)
+    keystore.enforce_file_permissions(path)
+
+
+def _pop_pending_pkce(auth_user_index: int) -> Optional[str]:
+    """Consume persisted PKCE code_verifier if present on disk."""
+    path = _pending_pkce_file(auth_user_index)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        verifier = data.get("code_verifier")
+        return str(verifier) if isinstance(verifier, str) and verifier.strip() else None
+    except Exception:
+        return None
+    finally:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Flow 1: Remote Out-of-band flow
 # ---------------------------------------------------------------------------
@@ -149,13 +227,14 @@ def fetch_user_email_from_token(access_token: str) -> Optional[str]:
 def generate_remote_consent_url(auth_user_index: int = 0) -> str:
     """
     Creates an InstalledAppFlow configured for remote copy-paste landing page.
-    Caches the flow instance for subsequent code exchange.
-    Returns the authorization URL.
+    Caches the flow instance (and persists its PKCE verifier on disk) for
+    subsequent code exchange across CLI or MCP processes.
     """
     client_config = get_oauth_client_config()
+    scopes = _resolve_oauth_scopes(client_config)
     flow = InstalledAppFlow.from_client_config(
         client_config,
-        scopes=COLAB_OAUTH_SCOPES,
+        scopes=scopes,
         redirect_uri=REMOTE_REDIRECT_URI,
     )
     auth_url, _ = flow.authorization_url(
@@ -164,6 +243,7 @@ def generate_remote_consent_url(auth_user_index: int = 0) -> str:
         access_type="offline",
     )
     _ACTIVE_REMOTE_FLOWS[auth_user_index] = flow
+    _save_pending_pkce(auth_user_index, getattr(flow, "code_verifier", None))
     return auth_url
 
 
@@ -177,23 +257,28 @@ async def exchange_remote_auth_code(auth_code: str, auth_user_index: int = 0) ->
     if not auth_code or not auth_code.strip():
         raise ColabAuthError("Authorization code cannot be empty.")
 
+    cleaned_code = _normalize_auth_code(auth_code)
     flow = _ACTIVE_REMOTE_FLOWS.pop(auth_user_index, None)
+    saved_verifier = _pop_pending_pkce(auth_user_index)
+    client_config = get_oauth_client_config()
+    scopes = _resolve_oauth_scopes(client_config)
     if flow is None:
-        client_config = get_oauth_client_config()
         flow = InstalledAppFlow.from_client_config(
             client_config,
-            scopes=COLAB_OAUTH_SCOPES,
+            scopes=scopes,
             redirect_uri=REMOTE_REDIRECT_URI,
         )
+        if saved_verifier:
+            flow.code_verifier = saved_verifier
 
     try:
         with _relax_oauthlib_token_scope():
-            flow.fetch_token(code=auth_code.strip())
+            await asyncio.to_thread(flow.fetch_token, code=cleaned_code)
     except Exception as e:
         raise ColabAuthError(f"OAuth code exchange failed: {e}") from e
 
     creds = flow.credentials
-    user_email = fetch_user_email_from_token(creds.token)
+    user_email = await asyncio.to_thread(fetch_user_email_from_token, creds.token)
 
     return GoogleCredentials(
         auth_method=AuthMethod.OAUTH_REMOTE,
@@ -205,7 +290,7 @@ async def exchange_remote_auth_code(auth_code: str, auth_user_index: int = 0) ->
         token_uri=creds.token_uri,
         client_id=creds.client_id,
         client_secret=creds.client_secret,
-        scopes=list(creds.scopes) if creds.scopes else COLAB_OAUTH_SCOPES,
+        scopes=list(creds.scopes) if creds.scopes else scopes,
     )
 
 
@@ -219,19 +304,23 @@ async def run_loopback_flow(auth_user_index: int = 0, timeout_seconds: int = 180
     Opens system browser and blocks until callback arrives or timeout.
     """
     client_config = get_oauth_client_config()
+    scopes = _resolve_oauth_scopes(client_config)
     flow = InstalledAppFlow.from_client_config(
         client_config,
-        scopes=COLAB_OAUTH_SCOPES,
+        scopes=scopes,
     )
+
     def _run_local_server() -> Any:
         with _relax_oauthlib_token_scope():
             return flow.run_local_server(
                 host="127.0.0.1",
                 port=0,
-                authorization_prompt_message="Opening browser for Google Colab authentication...",
-                success_message="Authentication complete! You may close this window and return to your agent.",
+                authorization_prompt_message=None,
+                success_message="Authentication complete! You may close this window and return to colab-mcp.",
                 open_browser=True,
                 timeout_seconds=timeout_seconds,
+                prompt="consent",
+                access_type="offline",
             )
 
     try:
@@ -239,7 +328,7 @@ async def run_loopback_flow(auth_user_index: int = 0, timeout_seconds: int = 180
     except Exception as e:
         raise ColabAuthError(f"Local loopback OAuth flow failed: {e}") from e
 
-    user_email = fetch_user_email_from_token(creds.token)
+    user_email = await asyncio.to_thread(fetch_user_email_from_token, creds.token)
 
     return GoogleCredentials(
         auth_method=AuthMethod.OAUTH_LOOPBACK,
@@ -251,7 +340,7 @@ async def run_loopback_flow(auth_user_index: int = 0, timeout_seconds: int = 180
         token_uri=creds.token_uri,
         client_id=creds.client_id,
         client_secret=creds.client_secret,
-        scopes=list(creds.scopes) if creds.scopes else COLAB_OAUTH_SCOPES,
+        scopes=list(creds.scopes) if creds.scopes else scopes,
     )
 
 
@@ -267,7 +356,20 @@ def ingest_adc_credentials(auth_user_index: int = 0) -> GoogleCredentials:
     Discovers ambient Application Default Credentials (e.g. from gcloud CLI).
     """
     try:
-        creds, project = google.auth.default(scopes=COLAB_OAUTH_SCOPES)
+        from unittest.mock import patch as _patch
+        from google.auth import _cloud_sdk
+
+        with (
+            warnings.catch_warnings(),
+            _patch.object(_cloud_sdk, "get_project_id", return_value=None),
+        ):
+            warnings.filterwarnings(
+                "ignore",
+                message=r"Your application has authenticated using end user credentials.*",
+                category=UserWarning,
+            )
+            creds, _ = google.auth.default(scopes=COLAB_OAUTH_SCOPES)
+
         request = google.auth.transport.requests.Request()
         if not creds.valid:
             creds.refresh(request)
@@ -295,7 +397,13 @@ def ingest_adc_credentials(auth_user_index: int = 0) -> GoogleCredentials:
         )
     except Exception as e:
         logger.debug("Ambient ADC ingestion failed: %s", e)
-        raise ColabAuthError(f"Ambient ADC ingestion failed: {e}") from e
+        raise ColabAuthError(
+            f"Ambient ADC ingestion failed: {e}. Run: "
+            "gcloud auth application-default login "
+            "--scopes=openid,https://www.googleapis.com/auth/cloud-platform,"
+            "https://www.googleapis.com/auth/userinfo.email,"
+            "https://www.googleapis.com/auth/colaboratory"
+        ) from e
 
 
 load_ambient_adc = ingest_adc_credentials
@@ -328,7 +436,7 @@ async def refresh_credentials(creds: GoogleCredentials) -> GoogleCredentials:
 
     request = google.auth.transport.requests.Request()
     try:
-        google_creds.refresh(request)
+        await asyncio.to_thread(google_creds.refresh, request)
     except RefreshError as e:
         logger.error("OAuth token refresh failed (revoked or expired): %s. Purging keystore.", e)
         purge_credentials(creds.auth_user_index)
@@ -350,7 +458,7 @@ async def refresh_credentials(creds: GoogleCredentials) -> GoogleCredentials:
     else:
         creds.token_expiry = None
     if not creds.user_email:
-        creds.user_email = fetch_user_email_from_token(creds.access_token)
+        creds.user_email = await asyncio.to_thread(fetch_user_email_from_token, creds.access_token)
 
     # Persist updated credentials back into keystore
     store_credentials(creds.auth_user_index, creds)

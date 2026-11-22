@@ -231,6 +231,7 @@ async def colab_get_auth_status_impl(
 
     if token_valid:
         try:
+            import httpx
             from colab_mcp.runtime.client import ColabTFEClient
 
             async with ColabTFEClient(auth_user_index=auth_user_index, timeout=3.0) as tfe_client:
@@ -239,6 +240,12 @@ async def colab_get_auth_status_impl(
                 compute_units_remaining = ccu.compute_units_remaining
                 if ccu.active_assignments_count > active_sessions_count:
                     active_sessions_count = ccu.active_assignments_count
+        except AuthenticationRequiredError:
+            if force_refresh:
+                token_valid = False
+        except httpx.HTTPStatusError as exc:
+            if force_refresh and exc.response is not None and exc.response.status_code == 401:
+                token_valid = False
         except Exception:
             pass
 

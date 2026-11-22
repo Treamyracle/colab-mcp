@@ -332,6 +332,16 @@ def login(
         "--auth-code",
         help="Authorization code for oauth_remote flow.",
     ),
+    cookies_json: Optional[str] = typer.Option(
+        None,
+        "--cookies-json",
+        help="JSON object mapping Google cookie names (SAPISID, SID, OSID) for cookie_import.",
+    ),
+    cookies_file: Optional[Path] = typer.Option(
+        None,
+        "--cookies-file",
+        help="Path to a JSON file containing cookie dictionary for cookie_import.",
+    ),
     timeout_seconds: int = typer.Option(
         180,
         "--timeout-seconds",
@@ -348,6 +358,27 @@ def login(
             param_hint="--timeout-seconds",
         )
 
+    import json as _json
+
+    parsed_cookies: Optional[Dict[str, str]] = None
+    if cookies_json is not None and cookies_file is not None:
+        emit_error(ValueError("Provide either --cookies-json or --cookies-file, not both."), as_json=json_output)
+    try:
+        if cookies_file is not None:
+            if not cookies_file.is_file():
+                raise FileNotFoundError(f"Cookies file not found: '{cookies_file}'.")
+            raw_obj = _json.loads(cookies_file.read_text(encoding="utf-8"))
+            if not isinstance(raw_obj, dict):
+                raise ValueError("Cookies file must contain a JSON object of cookie name -> value.")
+            parsed_cookies = {str(k): str(v) for k, v in raw_obj.items()}
+        elif cookies_json is not None:
+            raw_obj = _json.loads(cookies_json)
+            if not isinstance(raw_obj, dict):
+                raise ValueError("--cookies-json must decode to a JSON object.")
+            parsed_cookies = {str(k): str(v) for k, v in raw_obj.items()}
+    except Exception as exc:
+        emit_error(exc, as_json=json_output)
+
     from colab_mcp.auth.tools import colab_login_impl
 
     async def _do_login():
@@ -355,6 +386,7 @@ def login(
             method=method,
             auth_user_index=auth_user_index,
             auth_code=auth_code,
+            cookies=parsed_cookies,
             timeout_seconds=timeout_seconds,
         )
         ensure_cli_stdout()
@@ -362,6 +394,7 @@ def login(
             resp.status == "authorization_required"
             and method == "oauth_remote"
             and not auth_code
+            and not json_output
             and resp.auth_url
         ):
             typer.echo(f"Authorization URL:\n{redact_credentials(resp.auth_url)}")

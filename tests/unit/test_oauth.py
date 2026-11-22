@@ -30,7 +30,7 @@ from colab_mcp.auth.oauth import (
 )
 
 
-def test_generate_remote_consent_url_parameters():
+def test_generate_remote_consent_url_parameters(mock_keystore_dir):
     url = generate_remote_consent_url(auth_user_index=0)
     assert "https://accounts.google.com/o/oauth2/" in url
     assert f"client_id={DEFAULT_CLIENT_ID}" in url
@@ -38,6 +38,10 @@ def test_generate_remote_consent_url_parameters():
     assert "access_type=offline" in url
     assert "prompt=consent" in url
     assert "token_usage=remote" in url
+    assert "https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.file" in url
+    # Ensure restricted broad Drive scope is not sent with default public client ID
+    assert "auth%2Fdrive+" not in url
+    assert "auth%2Fdrive&" not in url
 
 
 @pytest.mark.asyncio
@@ -258,4 +262,112 @@ async def test_refresh_credentials_normalizes_google_naive_expiry(mock_keystore_
     stored = get_credentials(0)
     assert stored is not None
     assert stored.token_expiry.tzinfo == timezone.utc
+
+
+@pytest.mark.asyncio
+async def test_remote_pkce_verifier_persists_across_processes(mock_keystore_dir, monkeypatch):
+    from colab_mcp.auth.oauth import _ACTIVE_REMOTE_FLOWS, _pending_pkce_file
+
+    url = generate_remote_consent_url(auth_user_index=3)
+    assert "code_challenge=" in url
+    original_verifier = _ACTIVE_REMOTE_FLOWS[3].code_verifier
+    assert _pending_pkce_file(3).is_file()
+
+    # Simulate a second CLI process or MCP restart wiping in-memory flow state
+    _ACTIVE_REMOTE_FLOWS.clear()
+
+    seen = {}
+    mock_credentials = MagicMock()
+    mock_credentials.token = "ya29.pkce_token"
+    mock_credentials.refresh_token = "1//04pkce_refresh"
+    mock_credentials.expiry = datetime.now(timezone.utc) + timedelta(seconds=3600)
+    mock_credentials.token_uri = "https://oauth2.googleapis.com/token"
+    mock_credentials.client_id = DEFAULT_CLIENT_ID
+    mock_credentials.client_secret = "secret"
+    mock_credentials.scopes = COLAB_OAUTH_SCOPES
+
+    class FakeFlow:
+        def __init__(self):
+            self.code_verifier = "NEW_UNMATCHED_VERIFIER"
+            self.credentials = mock_credentials
+
+        def fetch_token(self, code):
+            seen["code"] = code
+            seen["verifier"] = self.code_verifier
+
+    monkeypatch.setattr(
+        "colab_mcp.auth.oauth.InstalledAppFlow.from_client_config",
+        lambda *args, **kwargs: FakeFlow(),
+    )
+    monkeypatch.setattr("colab_mcp.auth.oauth.fetch_user_email_from_token", lambda _: "pkce@example.com")
+
+    creds = await exchange_remote_auth_code(
+        "https://sdk.cloud.google.com/applicationdefaultauthcode.html?code=4/0Apaste_code&scope=openid",
+        auth_user_index=3,
+    )
+    assert seen["code"] == "4/0Apaste_code"
+    assert seen["verifier"] == original_verifier
+    assert creds.user_email == "pkce@example.com"
+    assert not _pending_pkce_file(3).exists()
+
+
+def test_cli_login_oauth_remote_json_and_cookie_import(mock_keystore_dir, mock_keyring, mock_machine_id):
+    import json as _json
+    from typer.testing import CliRunner
+    from colab_mcp.cli import app as cli_app
+
+    runner = CliRunner()
+    step1 = runner.invoke(cli_app, ["login", "--method", "oauth_remote", "--json"])
+    assert step1.exit_code == 0
+    data1 = _json.loads(step1.stdout)
+    assert data1["status"] == "authorization_required"
+    assert "accounts.google.com" in data1["auth_url"]
+
+    cookie_payload = _json.dumps({"SAPISID": "sap_1", "SID": "sid_1", "OSID": "osid_1"})
+    cookie_res = runner.invoke(
+        cli_app,
+        ["login", "--method", "cookie_import", "--cookies-json", cookie_payload, "--json"],
+    )
+    assert cookie_res.exit_code == 0
+    data_c = _json.loads(cookie_res.stdout)
+    assert data_c["status"] == "authenticated"
+    assert data_c["auth_method"] == "cookie_import"
+
+
+@pytest.mark.asyncio
+async def test_auth_status_flags_401_cookies_invalid(mock_keystore_dir, mock_keyring, mock_machine_id, monkeypatch):
+    import httpx
+    from colab_mcp.auth.tools import colab_get_auth_status_impl
+
+    store_credentials(
+        0,
+        GoogleCredentials(
+            cookies={"SAPISID": "bad", "SID": "bad", "OSID": "bad"},
+            auth_method=AuthMethod.COOKIE_IMPORT,
+            auth_user_index=0,
+        ),
+    )
+
+    class FailingTFE:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get_ccu_info(self):
+            req = httpx.Request("GET", "https://colab.research.google.com/tun/m/ccu-info")
+            raise httpx.HTTPStatusError("Unauthorized", request=req, response=httpx.Response(401, request=req))
+
+    monkeypatch.setattr("colab_mcp.runtime.client.ColabTFEClient", FailingTFE)
+    st_fast = await colab_get_auth_status_impl(auth_user_index=0, force_refresh=False)
+    assert st_fast.token_valid is True
+    st = await colab_get_auth_status_impl(auth_user_index=0, force_refresh=True)
+    assert st.token_valid is False
+    assert st.is_authenticated is False
+
+
 
